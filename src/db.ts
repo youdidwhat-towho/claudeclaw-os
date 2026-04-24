@@ -358,6 +358,28 @@ function createSchema(database: Database.Database): void {
   `);
 }
 
+export async function backupDatabase(retentionDays = 7): Promise<string | null> {
+  if (!db) return null;
+  try {
+    const backupDir = path.join(STORE_DIR, 'backups');
+    fs.mkdirSync(backupDir, { recursive: true });
+    fs.chmodSync(backupDir, 0o700);
+    const stamp = new Date().toISOString().slice(0, 10);
+    const backupPath = path.join(backupDir, `claudeclaw.db.${stamp}.bak`);
+    await db.backup(backupPath);
+
+    const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+    for (const f of fs.readdirSync(backupDir)) {
+      if (!f.endsWith('.bak')) continue;
+      const full = path.join(backupDir, f);
+      if (fs.statSync(full).mtimeMs < cutoff) fs.unlinkSync(full);
+    }
+    return backupPath;
+  } catch {
+    return null;
+  }
+}
+
 export function initDatabase(): void {
   fs.mkdirSync(STORE_DIR, { recursive: true });
   const dbPath = path.join(STORE_DIR, 'claudeclaw.db');
@@ -367,6 +389,7 @@ export function initDatabase(): void {
 
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
+  db.pragma('busy_timeout = 5000');
   createSchema(db);
   runMigrations(db);
 
@@ -656,6 +679,7 @@ export function _initTestDatabase(): void {
   encryptionKey = crypto.randomBytes(32);
   db = new Database(':memory:');
   db.pragma('journal_mode = WAL');
+  db.pragma('busy_timeout = 5000');
   createSchema(db);
   runMigrations(db);
 }

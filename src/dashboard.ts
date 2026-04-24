@@ -1445,8 +1445,8 @@ export function startDashboard(botApi?: Api<RawApi>): void {
 
   let server: ReturnType<typeof serve>;
   try {
-    server = serve({ fetch: app.fetch, port: DASHBOARD_PORT }, () => {
-      logger.info({ port: DASHBOARD_PORT }, 'Dashboard server running');
+    server = serve({ fetch: app.fetch, port: DASHBOARD_PORT, hostname: '127.0.0.1' }, () => {
+      logger.info({ port: DASHBOARD_PORT, hostname: '127.0.0.1' }, 'Dashboard server running (localhost-only)');
     });
   } catch (err: any) {
     if (err?.code === 'EADDRINUSE') {

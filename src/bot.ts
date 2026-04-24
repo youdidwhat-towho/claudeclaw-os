@@ -686,9 +686,11 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
       if (shouldSpeakBack) {
         try {
           // Don't speak the cost footer, just the actual response
-          const audioBuffer = await synthesizeSpeech(responseText);
-          // Send as audio (not voice note) to bypass Telegram's voice-message privacy gate
-          await ctx.replyWithAudio(new InputFile(audioBuffer, 'response.mp3'), {
+          const audio = await synthesizeSpeech(responseText);
+          // Send as audio (not voice note) to bypass Telegram's voice-message privacy gate.
+          // Filename extension MUST match the actual codec (mp3 only for ElevenLabs;
+          // Gradium/Kokoro/macOS-say all return OGG Opus). Mismatched ext breaks playback.
+          await ctx.replyWithAudio(new InputFile(audio.buffer, `response.${audio.ext}`), {
             title: 'Brad reply',
             performer: 'ClaudeClaw',
           });

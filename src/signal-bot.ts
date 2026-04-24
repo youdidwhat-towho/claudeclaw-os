@@ -462,8 +462,8 @@ export function createSignalBot(): SignalBot {
           // ship it as a Signal attachment. Fall back to text if TTS fails.
           let audioPath: string | null = null;
           try {
-            const audioBuffer = await synthesizeSpeech(responseText);
-            audioPath = writeTempFile(audioBuffer, '.mp3');
+            const audio = await synthesizeSpeech(responseText);
+            audioPath = writeTempFile(audio.buffer, `.${audio.ext}`);
             await rpc.sendWithAttachments(chatId, '', [audioPath]);
           } catch (ttsErr) {
             logger.error({ err: ttsErr }, 'TTS failed, falling back to text');

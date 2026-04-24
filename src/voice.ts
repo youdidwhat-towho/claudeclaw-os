@@ -440,7 +440,16 @@ export async function synthesizeSpeechLocal(text: string): Promise<Buffer> {
  * Convert text to speech using the first available provider.
  * Priority: ElevenLabs → Gradium AI → Kokoro (local) → macOS say + ffmpeg.
  */
-export async function synthesizeSpeech(text: string): Promise<Buffer> {
+export interface SynthesizedAudio {
+  buffer: Buffer;
+  ext: 'mp3' | 'ogg';
+  mimeType: 'audio/mpeg' | 'audio/ogg';
+}
+
+const MP3: Pick<SynthesizedAudio, 'ext' | 'mimeType'> = { ext: 'mp3', mimeType: 'audio/mpeg' };
+const OGG: Pick<SynthesizedAudio, 'ext' | 'mimeType'> = { ext: 'ogg', mimeType: 'audio/ogg' };
+
+export async function synthesizeSpeech(text: string): Promise<SynthesizedAudio> {
   const env = readEnvFile([
     'ELEVENLABS_API_KEY', 'ELEVENLABS_VOICE_ID',
     'GRADIUM_API_KEY', 'GRADIUM_VOICE_ID',
@@ -452,7 +461,7 @@ export async function synthesizeSpeech(text: string): Promise<Buffer> {
 
   if (hasElevenLabs) {
     try {
-      return await synthesizeSpeechElevenLabs(text);
+      return { buffer: await synthesizeSpeechElevenLabs(text), ...MP3 };
     } catch (err) {
       logger.warn({ err }, 'ElevenLabs TTS failed, trying next provider');
     }
@@ -460,7 +469,7 @@ export async function synthesizeSpeech(text: string): Promise<Buffer> {
 
   if (hasGradium) {
     try {
-      return await synthesizeSpeechGradium(text);
+      return { buffer: await synthesizeSpeechGradium(text), ...OGG };
     } catch (err) {
       logger.warn({ err }, 'Gradium TTS failed, trying next provider');
     }
@@ -469,13 +478,13 @@ export async function synthesizeSpeech(text: string): Promise<Buffer> {
   // Kokoro - local OpenAI-compatible TTS (no API key needed)
   if (env.KOKORO_URL) {
     try {
-      return await synthesizeSpeechKokoro(text);
+      return { buffer: await synthesizeSpeechKokoro(text), ...OGG };
     } catch (err) {
       logger.warn({ err }, 'Kokoro TTS failed, trying local fallback');
     }
   }
 
-  return await synthesizeSpeechLocal(text);
+  return { buffer: await synthesizeSpeechLocal(text), ...OGG };
 }
 
 // ── Capabilities check ──────────────────────────────────────────────────────
