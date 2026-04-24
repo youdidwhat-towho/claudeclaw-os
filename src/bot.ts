@@ -687,7 +687,11 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
         try {
           // Don't speak the cost footer, just the actual response
           const audioBuffer = await synthesizeSpeech(responseText);
-          await ctx.replyWithVoice(new InputFile(audioBuffer, 'response.ogg'));
+          // Send as audio (not voice note) to bypass Telegram's voice-message privacy gate
+          await ctx.replyWithAudio(new InputFile(audioBuffer, 'response.mp3'), {
+            title: 'Brad reply',
+            performer: 'ClaudeClaw',
+          });
         } catch (ttsErr) {
           logger.error({ err: ttsErr }, 'TTS failed, falling back to text');
           for (const part of splitMessage(formatForTelegram(textWithFooter))) {

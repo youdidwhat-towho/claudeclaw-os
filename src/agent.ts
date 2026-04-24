@@ -244,8 +244,13 @@ export async function runAgent(
         // Resume the previous session for this chat (persistent context)
         resume: sessionId,
 
-        // 'project' loads CLAUDE.md from cwd; 'user' loads ~/.claude/skills/ and user settings
-        settingSources: ['project', 'user'],
+        // 'project' loads CLAUDE.md from cwd; 'user' loads ~/.claude/skills/ and user settings.
+        // For non-main agents (agentCwd is defined), skip 'project' to prevent Claude Code from
+        // walking up the directory tree and loading the parent claudeclaw/CLAUDE.md (23KB of
+        // Brad-specific instructions irrelevant to sub-agents). Agent instructions are already
+        // injected via agentSystemPrompt prepend on new sessions, so 'project' is redundant
+        // and doubles startup context. Main agent keeps 'project' to load its own CLAUDE.md.
+        settingSources: agentCwd ? ['user'] : ['project', 'user'],
 
         // Skip all permission prompts — this is a trusted personal bot on your own machine
         permissionMode: 'bypassPermissions',
