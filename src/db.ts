@@ -210,8 +210,8 @@ function createSchema(database: Database.Database): void {
       prompt        TEXT NOT NULL,
       status        TEXT NOT NULL DEFAULT 'pending',
       result        TEXT,
-      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-      completed_at  TEXT
+      created_at    INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+      completed_at  INTEGER
     );
 
     CREATE INDEX IF NOT EXISTS idx_inter_agent_tasks_status ON inter_agent_tasks(status, created_at DESC);
@@ -671,6 +671,32 @@ function runMigrations(database: Database.Database): void {
   database.exec(
     `CREATE INDEX IF NOT EXISTS idx_convo_log_chat_agent ON conversation_log(chat_id, agent_id, created_at DESC)`,
   );
+
+  // Inter-agent tasks: created_at + completed_at TEXT → INTEGER (M-2 audit fix).
+  // Aligns with every other timestamp column in the schema (epoch seconds) and
+  // unblocks numeric date-math the dashboard already does on sibling tables.
+  // Drop+recreate is safe today because the table has been historically empty
+  // or near-empty; once delegation traffic ramps this would become destructive.
+  const iatCols = database.prepare(`PRAGMA table_info(inter_agent_tasks)`).all() as Array<{ name: string; type: string }>;
+  const iatCreatedAt = iatCols.find((c) => c.name === 'created_at');
+  if (iatCreatedAt && iatCreatedAt.type.toUpperCase() === 'TEXT') {
+    database.exec(`
+      DROP TABLE IF EXISTS inter_agent_tasks;
+      CREATE TABLE inter_agent_tasks (
+        id            TEXT PRIMARY KEY,
+        from_agent    TEXT NOT NULL,
+        to_agent      TEXT NOT NULL,
+        chat_id       TEXT NOT NULL,
+        prompt        TEXT NOT NULL,
+        status        TEXT NOT NULL DEFAULT 'pending',
+        result        TEXT,
+        created_at    INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+        completed_at  INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_inter_agent_tasks_status ON inter_agent_tasks(status, created_at DESC);
+    `);
+    logger.info('Migration: inter_agent_tasks created_at + completed_at TEXT → INTEGER (M-2)');
+  }
 }
 
 /** @internal - for tests only. Creates a fresh in-memory database. */
@@ -1314,27 +1340,44 @@ export function markWaMessageSent(id: number): void {
 // ── WhatsApp messages ────────────────────────────────────────────────
 
 /**
- * Prune WhatsApp messages older than the given number of days.
- * Covers wa_messages, wa_outbox (sent only), and wa_message_map.
+ * Prune WhatsApp messages older than the retention windows.
+ * - `retentionDays` (default 3): wa_messages, sent wa_outbox rows, wa_message_map
+ * - `unsentRetentionDays` (default 30): unsent wa_outbox rows (M-3 audit fix)
+ *
+ * Without the unsent window, persistent send failures left rows in
+ * wa_outbox forever, growing the queue and the unsent index unbounded.
  */
-export function pruneWaMessages(retentionDays = 3): { messages: number; outbox: number; map: number } {
-  const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400;
+export function pruneWaMessages(
+  retentionDays = 3,
+  unsentRetentionDays = 30,
+): { messages: number; outbox: number; outboxUnsent: number; map: number } {
+  const now = Math.floor(Date.now() / 1000);
+  const cutoffSent = now - retentionDays * 86400;
+  const cutoffUnsent = now - unsentRetentionDays * 86400;
 
   const msgResult = db.prepare(
     'DELETE FROM wa_messages WHERE created_at < ?',
-  ).run(cutoff);
+  ).run(cutoffSent);
 
   const outboxResult = db.prepare(
     'DELETE FROM wa_outbox WHERE sent_at IS NOT NULL AND created_at < ?',
-  ).run(cutoff);
+  ).run(cutoffSent);
+
+  // M-3: age out unsent rows that have been queued past the long window.
+  // Failed deliveries left in the queue indefinitely cause unbounded growth
+  // of the table and the partial idx_wa_outbox_unsent index.
+  const outboxUnsentResult = db.prepare(
+    'DELETE FROM wa_outbox WHERE sent_at IS NULL AND created_at < ?',
+  ).run(cutoffUnsent);
 
   const mapResult = db.prepare(
     'DELETE FROM wa_message_map WHERE created_at < ?',
-  ).run(cutoff);
+  ).run(cutoffSent);
 
   return {
     messages: msgResult.changes,
     outbox: outboxResult.changes,
+    outboxUnsent: outboxUnsentResult.changes,
     map: mapResult.changes,
   };
 }
@@ -1972,8 +2015,8 @@ export interface InterAgentTask {
   prompt: string;
   status: string;
   result: string | null;
-  created_at: string;
-  completed_at: string | null;
+  created_at: number;
+  completed_at: number | null;
 }
 
 export function createInterAgentTask(
@@ -1985,7 +2028,7 @@ export function createInterAgentTask(
 ): void {
   db.prepare(
     `INSERT INTO inter_agent_tasks (id, from_agent, to_agent, chat_id, prompt, status, created_at)
-     VALUES (?, ?, ?, ?, ?, 'pending', datetime('now'))`,
+     VALUES (?, ?, ?, ?, ?, 'pending', CAST(strftime('%s','now') AS INTEGER))`,
   ).run(id, fromAgent, toAgent, chatId, prompt);
 }
 
@@ -1995,7 +2038,7 @@ export function completeInterAgentTask(
   result: string | null,
 ): void {
   db.prepare(
-    `UPDATE inter_agent_tasks SET status = ?, result = ?, completed_at = datetime('now') WHERE id = ?`,
+    `UPDATE inter_agent_tasks SET status = ?, result = ?, completed_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?`,
   ).run(status, result?.slice(0, 2000) ?? null, id);
 }
 
