@@ -124,7 +124,7 @@ export function startDashboard(botApi?: Api<RawApi>): void {
   app.use('*', async (c, next) => {
     c.header('Access-Control-Allow-Origin', '*');
     c.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, PATCH, OPTIONS');
-    c.header('Access-Control-Allow-Headers', 'Content-Type');
+    c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     if (c.req.method === 'OPTIONS') return c.body(null, 204);
     await next();
   });
@@ -135,9 +135,15 @@ export function startDashboard(botApi?: Api<RawApi>): void {
     return c.json({ error: 'Internal server error' }, 500);
   });
 
-  // Token auth middleware
+  // Token auth middleware. Accepts Authorization: Bearer <token> header (preferred,
+  // avoids token leakage via referer/history/access logs) OR ?token= query param
+  // (backward compat for top-level page loads, image src, EventSource — request
+  // types where the browser cannot set custom headers).
   app.use('*', async (c, next) => {
-    const token = c.req.query('token');
+    const headerAuth = c.req.header('Authorization') || '';
+    const headerToken = headerAuth.startsWith('Bearer ') ? headerAuth.slice(7).trim() : '';
+    const queryToken = c.req.query('token') || '';
+    const token = headerToken || queryToken;
     if (!DASHBOARD_TOKEN || !token || token !== DASHBOARD_TOKEN) {
       return c.json({ error: 'Unauthorized' }, 401);
     }
