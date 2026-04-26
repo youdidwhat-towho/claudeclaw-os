@@ -670,6 +670,34 @@ const TOKEN = ${JSON.stringify(token)};
 const CHAT_ID = ${JSON.stringify(chatId)};
 const BASE = location.origin;
 
+// H-3: auto-migrate fetch calls from ?token= URL param to Authorization: Bearer header.
+// Reduces token leakage via referer, browser history, and server access logs.
+// EventSource and <img> src still carry ?token= (browser API limitation on those types).
+(function() {
+  const origFetch = window.fetch.bind(window);
+  function stripToken(rawUrl) {
+    try {
+      const u = new URL(rawUrl, location.origin);
+      u.searchParams.delete('token');
+      return /^https?:/i.test(rawUrl)
+        ? u.toString()
+        : u.pathname + (u.search || '') + (u.hash || '');
+    } catch (e) { return rawUrl; }
+  }
+  window.fetch = function(input, init) {
+    init = init || {};
+    const url = (typeof input === 'string') ? input : (input && input.url) || '';
+    if (/\\/(api|warroom)/.test(url)) {
+      const cleaned = stripToken(url);
+      const headers = new Headers(init.headers || (typeof input !== 'string' && input.headers) || {});
+      if (!headers.has('Authorization')) headers.set('Authorization', 'Bearer ' + TOKEN);
+      init.headers = headers;
+      input = (typeof input === 'string') ? cleaned : new Request(cleaned, input);
+    }
+    return origFetch(input, init);
+  };
+})();
+
 // Device detection
 function detectDevice() {
   const ua = navigator.userAgent;
@@ -1056,7 +1084,13 @@ async function loadTokens() {
 }
 
 function escapeHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  if (s === null || s === undefined) return '';
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
 }
 
 function copyCode(btn) {
@@ -1659,7 +1693,7 @@ async function loadAgents() {
       const modelShort = function(m) { return {'claude-opus-4-6':'Opus','claude-sonnet-4-6':'Sonnet','claude-sonnet-4-5':'Sonnet 4.5','claude-haiku-4-5':'Haiku'}[m] || m; };
       const currentModel = a.model || (a.id === 'main' ? 'claude-opus-4-6' : 'claude-sonnet-4-6');
       const modelLabel = modelShort(currentModel);
-      const modelSelect = '<div class="model-picker" data-agent="' + a.id + '" onclick="event.stopPropagation();toggleModelPicker(this)">' +
+      const modelSelect = '<div class="model-picker" data-agent="' + escapeHtml(a.id) + '" onclick="event.stopPropagation();toggleModelPicker(this)">' +
         '<span class="model-current">' + modelLabel + ' <span style="font-size:8px;opacity:0.5">&#9662;</span></span>' +
         '<div class="model-menu" style="display:none">' +
           modelOpts.map(m => '<div class="model-opt' + (currentModel === m ? ' model-active' : '') + '" data-model="' + m + '" onclick="pickModel(this)">' + modelShort(m) + '</div>').join('') +
@@ -1692,11 +1726,11 @@ async function loadAgents() {
         const title = a.telegramConnected ? 'Telegram connected' : 'Telegram disconnected';
         tgPill = '<span class="pill ' + cls + '" title="' + title + '" style="font-size:10px;padding:1px 6px;margin-left:4px">TG</span>';
       }
-      return '<div class="card clickable-card"' + dragAttrs + ' style="min-width:150px;flex:1;max-width:220px;border-left:3px solid ' + color + ';' + grabCursor + 'transition:opacity 0.15s,transform 0.15s" data-agent="' + a.id + '" onclick="toggleAgentDetail(this.dataset.agent)">' +
+      return '<div class="card clickable-card"' + dragAttrs + ' style="min-width:150px;flex:1;max-width:220px;border-left:3px solid ' + color + ';' + grabCursor + 'transition:opacity 0.15s,transform 0.15s" data-agent="' + escapeHtml(a.id) + '" onclick="toggleAgentDetail(this.dataset.agent)">' +
         '<div style="display:flex;gap:10px;align-items:flex-start">' +
           avatarImg +
           '<div style="flex:1;min-width:0">' +
-            '<div class="font-bold text-white text-sm">' + a.name + tgPill + '</div>' +
+            '<div class="font-bold text-white text-sm">' + escapeHtml(a.name) + tgPill + '</div>' +
             descBlock +
             '<div class="text-xs mt-1">' + dot + ' ' + statusText + '</div>' +
             modelSelect +
@@ -1760,7 +1794,7 @@ async function toggleAgentDetail(agentId) {
   // Find agent info
   var agent = missionAgentsList.find(function(a) { return a.id === agentId; });
   var color = AGENT_COLORS[agentId] || '#6b7280';
-  title.innerHTML = '<span style="color:' + color + '">' + (agent ? agent.name : agentId) + '</span>';
+  title.innerHTML = '<span style="color:' + color + '">' + escapeHtml(agent ? agent.name : agentId) + '</span>';
   body.innerHTML = '<div class="text-gray-500 text-sm text-center py-8">Loading...</div>';
 
   overlay.style.opacity = '1';
