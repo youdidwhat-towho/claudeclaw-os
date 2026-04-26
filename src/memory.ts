@@ -213,12 +213,18 @@ export function runDecaySweep(): void {
   decayMemories();
   pruneConversationLog(500);
 
-  // Enforce 3-day retention on messaging data
-  const wa = pruneWaMessages(3);
+  // Enforce 3-day retention on messaging data, 30-day on unsent outbox.
+  const wa = pruneWaMessages(3, 30);
   const slack = pruneSlackMessages(3);
-  if (wa.messages + wa.outbox + wa.map + slack > 0) {
+  if (wa.messages + wa.outbox + wa.outboxUnsent + wa.map + slack > 0) {
     logger.info(
-      { wa_messages: wa.messages, wa_outbox: wa.outbox, wa_map: wa.map, slack },
+      {
+        wa_messages: wa.messages,
+        wa_outbox: wa.outbox,
+        wa_outbox_unsent: wa.outboxUnsent,
+        wa_map: wa.map,
+        slack,
+      },
       'Retention pruning complete',
     );
   }
