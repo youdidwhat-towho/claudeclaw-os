@@ -65,6 +65,15 @@ export function loadMcpServers(allowlist?: string[], projectCwd?: string): Recor
   // If an allowlist is provided, only keep the MCPs in that list
   if (allowlist) {
     const allowed = new Set(allowlist);
+    // Warn on silent-dropped MCPs: allowlisted names with no matching config.
+    // Catches typos, missing local-stdio installs, and cloud-only MCP names
+    // (e.g. Claude.ai connectors) that don't exist in any settings.json on disk.
+    const missing = allowlist.filter((name) => !(name in merged));
+    if (missing.length > 0) {
+      logger.warn(
+        `[mcp] allowlist references ${missing.length} MCP server(s) with no matching config in user/project settings.json: ${missing.join(', ')}`,
+      );
+    }
     for (const name of Object.keys(merged)) {
       if (!allowed.has(name)) delete merged[name];
     }
