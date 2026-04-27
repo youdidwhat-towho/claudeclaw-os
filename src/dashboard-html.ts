@@ -689,7 +689,13 @@ const BASE = location.origin;
   function stripToken(rawUrl) {
     try {
       const u = new URL(rawUrl, location.origin);
-      u.searchParams.delete('token');
+      // Audit #16: case-insensitive ?TOKEN= / ?Token= variants must also be
+      // stripped or they leak past the wrapper into URLs and access logs.
+      const toDelete = [];
+      for (const k of u.searchParams.keys()) {
+        if (k.toLowerCase() === 'token') toDelete.push(k);
+      }
+      for (const k of toDelete) u.searchParams.delete(k);
       return /^https?:/i.test(rawUrl)
         ? u.toString()
         : u.pathname + (u.search || '') + (u.hash || '');
@@ -1117,7 +1123,13 @@ async function loadTokens() {
 
 function escapeHtml(s) {
   if (s === null || s === undefined) return '';
-  return String(s)
+  // Audit #15: Symbols throw on implicit '' + sym concat. Even though
+  // String(Symbol()) succeeds, defensive bail-out is safer than rendering
+  // an opaque Symbol(description) into innerHTML.
+  if (typeof s === 'symbol' || typeof s === 'function') return '';
+  let str;
+  try { str = String(s); } catch (e) { return ''; }
+  return str
     .replace(/&/g,'&amp;')
     .replace(/</g,'&lt;')
     .replace(/>/g,'&gt;')

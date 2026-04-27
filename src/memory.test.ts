@@ -15,6 +15,8 @@ vi.mock('./db.js', () => ({
   pruneSlackMessages: vi.fn(() => 0),
   searchConsolidations: vi.fn(),
   getRecentConsolidations: vi.fn(),
+  getSystemValue: vi.fn(() => undefined),
+  setSystemValue: vi.fn(),
 }));
 
 vi.mock('./memory-ingest.js', () => ({

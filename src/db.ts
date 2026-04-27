@@ -120,6 +120,14 @@ function createSchema(database: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_consolidations_chat ON consolidations(chat_id, created_at DESC);
 
+    -- Audit #17: small kv store for system-level state. First user is the
+    -- decay sweep's NTP-rollback guard (last_decay_sweep_at). Add new keys
+    -- by convention: snake_case, owner-prefixed when scoped.
+    CREATE TABLE IF NOT EXISTS system_state (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS wa_message_map (
       telegram_msg_id INTEGER PRIMARY KEY,
       wa_chat_id      TEXT NOT NULL,
@@ -1370,6 +1378,20 @@ export function markWaMessageSent(id: number): void {
 export function markWaMessageAttempted(id: number): void {
   const now = Math.floor(Date.now() / 1000);
   db.prepare(`UPDATE wa_outbox SET last_attempted_at = ? WHERE id = ?`).run(now, id);
+}
+
+// ── system_state kv (audit #17) ──────────────────────────────────────
+
+export function getSystemValue(key: string): string | undefined {
+  const row = db.prepare('SELECT value FROM system_state WHERE key = ?').get(key) as { value: string } | undefined;
+  return row?.value;
+}
+
+export function setSystemValue(key: string, value: string): void {
+  db.prepare(
+    `INSERT INTO system_state (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  ).run(key, value);
 }
 
 // ── WhatsApp messages ────────────────────────────────────────────────

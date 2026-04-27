@@ -841,7 +841,13 @@ const API_BASE = window.location.origin;
   function stripToken(rawUrl) {
     try {
       const u = new URL(rawUrl, location.origin);
-      u.searchParams.delete('token');
+      // Audit #16: case-insensitive ?TOKEN= / ?Token= variants must also be
+      // stripped or they leak past the wrapper into URLs and access logs.
+      const toDelete = [];
+      for (const k of u.searchParams.keys()) {
+        if (k.toLowerCase() === 'token') toDelete.push(k);
+      }
+      for (const k of toDelete) u.searchParams.delete(k);
       return /^https?:/i.test(rawUrl)
         ? u.toString()
         : u.pathname + (u.search || '') + (u.hash || '');

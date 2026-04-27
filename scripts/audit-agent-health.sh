@@ -58,6 +58,16 @@ printf '%-14s %-12s %-8s %-8s %-8s %s\n' "----" "---------" "------" "-------" "
 for log in "${log_files[@]}"; do
   agent="$(basename "$log" .log)"
 
+  # Audit #18: zero-byte or mid-rotation logs were silently producing
+  # "no-boot-marker" status that read as ambiguous. Distinguish empty/
+  # tiny logs explicitly so they can't be confused with a real boot
+  # failure or a missing-marker bug.
+  bytes=$(stat -f%z "$log" 2>/dev/null || stat -c%s "$log" 2>/dev/null || echo 0)
+  if [ "$bytes" -lt 256 ]; then
+    printf '%-14s %-12s %-8s %-8s %-8s %s\n' "$agent" "n/a" "?" "?" "?" "log-empty(${bytes}b)"
+    continue
+  fi
+
   # Find the line number of the most recent boot marker. Pino emits
   # "Running as agent" once per specialist start. Main writes
   # "ClaudeClaw is running" near the end of its boot. mcp-server

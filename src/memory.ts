@@ -7,6 +7,7 @@ import {
   getOtherAgentActivity,
   getRecentConsolidations,
   getRecentHighImportanceMemories,
+  getSystemValue,
   getTurnCountSinceTimestamp,
   logConversationTurn,
   pruneConversationLog,
@@ -15,6 +16,7 @@ import {
   searchConsolidations,
   searchConversationHistory,
   searchMemories,
+  setSystemValue,
 } from './db.js';
 import { cosineSimilarity, embedText } from './embeddings.js';
 import { generateContent, parseJsonResponse } from './gemini.js';
@@ -210,6 +212,22 @@ export function saveConversationTurn(
  * conversations that must not persist on disk indefinitely.
  */
 export function runDecaySweep(): void {
+  // Audit #17: NTP-rollback guard. If the wall clock has gone backwards
+  // since the last sweep, refuse to run. Otherwise the new (smaller)
+  // cutoff timestamps could re-eligibilize rows that were already
+  // examined in a previous sweep, or run identical sweeps repeatedly
+  // until the clock catches up.
+  const now = Math.floor(Date.now() / 1000);
+  const lastRaw = getSystemValue('last_decay_sweep_at');
+  const last = lastRaw ? Number(lastRaw) : 0;
+  if (last > 0 && now < last) {
+    logger.warn(
+      { now, last, drift_seconds: last - now },
+      'Decay sweep skipped: clock appears to have rolled back (NTP drift suspected)',
+    );
+    return;
+  }
+
   decayMemories();
   pruneConversationLog(500);
 
@@ -228,6 +246,8 @@ export function runDecaySweep(): void {
       'Retention pruning complete',
     );
   }
+
+  setSystemValue('last_decay_sweep_at', String(now));
 }
 
 /**
