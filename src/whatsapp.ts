@@ -6,7 +6,7 @@ const { Client, LocalAuth } = wwebjs;
 type Message = wwebjs.Message;
 
 import { STORE_DIR } from './config.js';
-import { getPendingWaMessages, markWaMessageSent, saveWaMessage } from './db.js';
+import { getPendingWaMessages, markWaMessageAttempted, markWaMessageSent, saveWaMessage } from './db.js';
 import { logger } from './logger.js';
 
 export type OnIncomingMessage = (contactName: string, isGroup: boolean, groupName?: string) => void;
@@ -125,6 +125,9 @@ function startOutboxPoller(): void {
     if (!client) return;
     const pending = getPendingWaMessages();
     for (const item of pending) {
+      // Bump last_attempted_at before send so the purge sweep can't delete
+      // this row mid-send (audit #6 race fix).
+      markWaMessageAttempted(item.id);
       try {
         await client.sendMessage(item.to_chat_id, item.body);
         markWaMessageSent(item.id);

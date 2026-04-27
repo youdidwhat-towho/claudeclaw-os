@@ -128,11 +128,12 @@ function createSchema(database: Database.Database): void {
     );
 
     CREATE TABLE IF NOT EXISTS wa_outbox (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      to_chat_id  TEXT NOT NULL,
-      body        TEXT NOT NULL,
-      created_at  INTEGER NOT NULL,
-      sent_at     INTEGER
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      to_chat_id        TEXT NOT NULL,
+      body              TEXT NOT NULL,
+      created_at        INTEGER NOT NULL,
+      sent_at           INTEGER,
+      last_attempted_at INTEGER
     );
 
     CREATE INDEX IF NOT EXISTS idx_wa_outbox_unsent ON wa_outbox(sent_at) WHERE sent_at IS NULL;
@@ -696,6 +697,16 @@ function runMigrations(database: Database.Database): void {
       CREATE INDEX IF NOT EXISTS idx_inter_agent_tasks_status ON inter_agent_tasks(status, created_at DESC);
     `);
     logger.info('Migration: inter_agent_tasks created_at + completed_at TEXT → INTEGER (M-2)');
+  }
+
+  // wa_outbox: add last_attempted_at column for race-safe purge (audit #6).
+  // Send loop bumps it before each send attempt; purge gates on it so the
+  // daily sweep can't DELETE a row mid-send (race window) and can still age
+  // out rows that have been abandoned for the full retention window.
+  const waOutboxCols = database.prepare(`PRAGMA table_info(wa_outbox)`).all() as Array<{ name: string }>;
+  if (!waOutboxCols.some((c) => c.name === 'last_attempted_at')) {
+    database.exec(`ALTER TABLE wa_outbox ADD COLUMN last_attempted_at INTEGER`);
+    logger.info('Migration: wa_outbox add last_attempted_at column (audit #6)');
   }
 }
 
@@ -1337,6 +1348,16 @@ export function markWaMessageSent(id: number): void {
   db.prepare(`UPDATE wa_outbox SET sent_at = ? WHERE id = ?`).run(now, id);
 }
 
+/**
+ * Bump last_attempted_at on a wa_outbox row. Called by the send loop before
+ * each send attempt so the purge sweep can distinguish actively-retried rows
+ * from abandoned ones (audit #6 race fix).
+ */
+export function markWaMessageAttempted(id: number): void {
+  const now = Math.floor(Date.now() / 1000);
+  db.prepare(`UPDATE wa_outbox SET last_attempted_at = ? WHERE id = ?`).run(now, id);
+}
+
 // ── WhatsApp messages ────────────────────────────────────────────────
 
 /**
@@ -1363,12 +1384,22 @@ export function pruneWaMessages(
     'DELETE FROM wa_outbox WHERE sent_at IS NOT NULL AND created_at < ?',
   ).run(cutoffSent);
 
-  // M-3: age out unsent rows that have been queued past the long window.
-  // Failed deliveries left in the queue indefinitely cause unbounded growth
-  // of the table and the partial idx_wa_outbox_unsent index.
+  // M-3 + audit #6: age out unsent rows that have been queued past the long
+  // window. Failed deliveries left in the queue indefinitely cause unbounded
+  // growth of the table and the partial idx_wa_outbox_unsent index.
+  // Audit #6 fixes:
+  //   - created_at > 0 guard skips legacy / null-coalesced rows that would
+  //     otherwise always satisfy `< cutoff` and get nuked on first sweep
+  //   - last_attempted_at gate closes the race window where the send loop
+  //     reads a row, the sweep deletes it before the UPDATE sent_at, and the
+  //     message silently disappears
   const outboxUnsentResult = db.prepare(
-    'DELETE FROM wa_outbox WHERE sent_at IS NULL AND created_at < ?',
-  ).run(cutoffUnsent);
+    `DELETE FROM wa_outbox
+     WHERE sent_at IS NULL
+       AND created_at > 0
+       AND created_at < ?
+       AND (last_attempted_at IS NULL OR last_attempted_at < ?)`,
+  ).run(cutoffUnsent, cutoffUnsent);
 
   const mapResult = db.prepare(
     'DELETE FROM wa_message_map WHERE created_at < ?',
