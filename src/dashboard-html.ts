@@ -926,7 +926,7 @@ async function loadTasks() {
     }
     c.innerHTML = data.tasks.map(t => {
       const statusCls = t.status === 'running' ? 'pill-running' : t.status === 'active' ? 'pill-active' : 'pill-paused';
-      const agentBadge = t.agent_id && t.agent_id !== 'main' ? '<span class="text-xs text-gray-500 ml-2">[' + resolveAgentName(t.agent_id) + ']</span>' : '';
+      const agentBadge = t.agent_id && t.agent_id !== 'main' ? '<span class="text-xs text-gray-500 ml-2">[' + escapeHtml(resolveAgentName(t.agent_id)) + ']</span>' : '';
       const lastStatusIcon = t.last_status === 'success' ? '<span class="last-success" title="Last run succeeded">&#10003;</span> ' : t.last_status === 'failed' ? '<span class="last-failed" title="Last run failed">&#10007;</span> ' : t.last_status === 'timeout' ? '<span class="last-timeout" title="Last run timed out">&#9200;</span> ' : '';
       const lastResult = t.last_result ? '<details class="mt-2"><summary class="text-xs text-gray-500">' + lastStatusIcon + 'Last result</summary><pre class="text-xs text-gray-400 mt-1 whitespace-pre-wrap break-words">' + escapeHtml(t.last_result) + '</pre></details>' : '';
       const runningInfo = t.status === 'running' && t.started_at ? '<span class="text-xs text-blue-400 ml-2">running for ' + elapsed(t.started_at) + '</span>' : '';
@@ -1866,7 +1866,7 @@ async function toggleAgentDetail(agentId) {
       html += tasks.tasks.slice(0, 5).map(function(t) {
         return '<div style="background:#1a1a1a;border-radius:6px;padding:8px;margin-bottom:4px">' +
           '<div class="text-xs text-gray-300">' + escapeHtml(t.prompt.slice(0, 100)) + '</div>' +
-          '<div class="text-xs text-gray-600 mt-1">' + t.schedule + '</div></div>';
+          '<div class="text-xs text-gray-600 mt-1">' + escapeHtml(t.schedule) + '</div></div>';
       }).join('');
     }
 
@@ -2333,7 +2333,7 @@ async function loadHiveMind() {
       const blurClass = isBlurred ? 'privacy-blur' : '';
       return '<tr>' +
         '<td class="col-time">' + time + '</td>' +
-        '<td class="col-agent" style="color:' + color + '">' + resolveAgentName(e.agent_id) + '</td>' +
+        '<td class="col-agent" style="color:' + color + '">' + escapeHtml(resolveAgentName(e.agent_id)) + '</td>' +
         '<td class="col-action">' + escapeHtml(e.action) + '</td>' +
         '<td><div class="col-summary ' + blurClass + '" data-section="hive" data-idx="' + i + '" onclick="toggleItemBlur(this)">' + escapeHtml(e.summary) + '</div></td>' +
       '</tr>';
@@ -2514,7 +2514,7 @@ function renderMissionCard(t) {
     cancelled: '<span class="pill" style="background:#374151;color:#9ca3af">cancelled</span>',
   };
   const statusPill = statusMap[t.status] || '<span class="pill">' + t.status + '</span>';
-  const agentBadge = t.status === 'queued' ? '<span class="text-xs" style="color:' + color + '">@' + t.assigned_agent + '</span>' : '';
+  const agentBadge = t.status === 'queued' ? '<span class="text-xs" style="color:' + color + '">@' + escapeHtml(t.assigned_agent) + '</span>' : '';
   const timeAgo = elapsed(t.created_at);
   let durationStr = '';
   if (t.completed_at && t.started_at) {
@@ -2863,7 +2863,7 @@ async function loadHistoryPage() {
           '<span class="pill ' + statusCls + '" style="' + statusStyle + '">' + t.status + '</span>' +
         '</div>' +
         '<div class="flex items-center gap-2 text-xs text-gray-500">' +
-          '<span style="color:' + color + '">@' + (t.assigned_agent || 'unassigned') + '</span>' +
+          '<span style="color:' + color + '">@' + escapeHtml(t.assigned_agent || 'unassigned') + '</span>' +
           '<span>' + date + ' ' + time + '</span>' +
           (dur ? '<span>' + dur + '</span>' : '') +
         '</div>' +
