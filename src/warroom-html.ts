@@ -17,7 +17,25 @@ export function getWarRoomHtml(token: string, chatId: string, warroomPort: numbe
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- Audit #8: prevent Referer leakage of any token query param to other origins. -->
+<meta name="referrer" content="no-referrer">
 <title>War Room</title>
+<script>
+  // Audit #8: scrub ?token= from the URL bar + browser history asap so the
+  // token doesn't sit in browser history, doesn't bleed into the next
+  // page-load Referer header, and doesn't show up in screen-share recordings.
+  // The server-rendered TOKEN constant below is the source of truth; the URL
+  // copy is only needed for the initial page-load auth and is now redundant.
+  (function() {
+    try {
+      var u = new URL(location.href);
+      if (u.searchParams.has('token')) {
+        u.searchParams.delete('token');
+        history.replaceState(null, '', u.pathname + (u.search || '') + (u.hash || ''));
+      }
+    } catch (e) {}
+  })();
+</script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 

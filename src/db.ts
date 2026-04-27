@@ -676,27 +676,41 @@ function runMigrations(database: Database.Database): void {
   // Inter-agent tasks: created_at + completed_at TEXT → INTEGER (M-2 audit fix).
   // Aligns with every other timestamp column in the schema (epoch seconds) and
   // unblocks numeric date-math the dashboard already does on sibling tables.
-  // Drop+recreate is safe today because the table has been historically empty
-  // or near-empty; once delegation traffic ramps this would become destructive.
+  //
+  // Audit #11: gate on `!== 'INTEGER'` instead of `=== 'TEXT'` so any
+  // intermediate type (NULL, NUMERIC, BLOB, missing column) still triggers
+  // the migration to the canonical schema.
+  // Audit #12: row-count guard. Drop+recreate is destructive — refuse to
+  // migrate if the table has rows so we don't silently lose delegation
+  // traffic. If hit, surface a loud error and leave the schema as-is for
+  // manual remediation.
   const iatCols = database.prepare(`PRAGMA table_info(inter_agent_tasks)`).all() as Array<{ name: string; type: string }>;
   const iatCreatedAt = iatCols.find((c) => c.name === 'created_at');
-  if (iatCreatedAt && iatCreatedAt.type.toUpperCase() === 'TEXT') {
-    database.exec(`
-      DROP TABLE IF EXISTS inter_agent_tasks;
-      CREATE TABLE inter_agent_tasks (
-        id            TEXT PRIMARY KEY,
-        from_agent    TEXT NOT NULL,
-        to_agent      TEXT NOT NULL,
-        chat_id       TEXT NOT NULL,
-        prompt        TEXT NOT NULL,
-        status        TEXT NOT NULL DEFAULT 'pending',
-        result        TEXT,
-        created_at    INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
-        completed_at  INTEGER
+  if (iatCreatedAt && iatCreatedAt.type.toUpperCase() !== 'INTEGER') {
+    const rowCount = (database.prepare(`SELECT COUNT(*) as c FROM inter_agent_tasks`).get() as { c: number }).c;
+    if (rowCount > 0) {
+      logger.error(
+        { rowCount, currentType: iatCreatedAt.type },
+        'Migration M-2 SKIPPED: inter_agent_tasks has rows — refusing destructive DROP. Manual remediation required (export, drop, recreate, reimport).',
       );
-      CREATE INDEX IF NOT EXISTS idx_inter_agent_tasks_status ON inter_agent_tasks(status, created_at DESC);
-    `);
-    logger.info('Migration: inter_agent_tasks created_at + completed_at TEXT → INTEGER (M-2)');
+    } else {
+      database.exec(`
+        DROP TABLE IF EXISTS inter_agent_tasks;
+        CREATE TABLE inter_agent_tasks (
+          id            TEXT PRIMARY KEY,
+          from_agent    TEXT NOT NULL,
+          to_agent      TEXT NOT NULL,
+          chat_id       TEXT NOT NULL,
+          prompt        TEXT NOT NULL,
+          status        TEXT NOT NULL DEFAULT 'pending',
+          result        TEXT,
+          created_at    INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+          completed_at  INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_inter_agent_tasks_status ON inter_agent_tasks(status, created_at DESC);
+      `);
+      logger.info('Migration: inter_agent_tasks created_at + completed_at → INTEGER (M-2, audit #11+#12)');
+    }
   }
 
   // wa_outbox: add last_attempted_at column for race-safe purge (audit #6).

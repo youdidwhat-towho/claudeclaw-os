@@ -62,8 +62,16 @@ for log in "${log_files[@]}"; do
   # "Running as agent" once per specialist start. Main writes
   # "ClaudeClaw is running" near the end of its boot. mcp-server
   # writes "ClaudeClaw MCP server running on port" via plain stdout.
-  # Try in order of specificity.
-  boot_line=$(grep -nE "Running as agent|ClaudeClaw is running|ClaudeClaw MCP server running" "$log" 2>/dev/null | tail -1 | cut -d: -f1 || true)
+  #
+  # Audit #14 fix: anchor on the Pino-pretty `): \x1b[36mMSG\x1b[39m$`
+  # message-field structure so a task prompt body that happens to
+  # contain literal "Running as agent" can't be mistaken for a boot
+  # line. mcp-server doesn't use Pino pretty so its plain marker stays
+  # unanchored, but its specific phrasing is unique enough to be safe.
+  ESC=$(printf '\033')
+  pino_boot_pattern="\\): ${ESC}\\[36m(Running as agent|ClaudeClaw is running)${ESC}\\[39m\$"
+  mcp_boot_pattern='ClaudeClaw MCP server running'
+  boot_line=$(grep -nE "($pino_boot_pattern)|$mcp_boot_pattern" "$log" 2>/dev/null | tail -1 | cut -d: -f1 || true)
 
   if [ -z "$boot_line" ]; then
     printf '%-14s %-12s %-8s %-8s %-8s %s\n' "$agent" "n/a" "?" "?" "?" "no-boot-marker"
