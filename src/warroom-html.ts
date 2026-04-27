@@ -837,7 +837,28 @@ const API_BASE = window.location.origin;
       const headers = new Headers(init.headers || (typeof input !== 'string' && input.headers) || {});
       if (!headers.has('Authorization')) headers.set('Authorization', 'Bearer ' + TOKEN);
       init.headers = headers;
-      input = (typeof input === 'string') ? cleaned : new Request(cleaned, input);
+      if (typeof input === 'string') {
+        input = cleaned;
+      } else {
+        // Spec: Request init must be a plain RequestInit, not a Request.
+        // Passing a Request silently drops signal/duplex and re-reads consumed bodies.
+        const reqInit = {
+          method: input.method,
+          headers: headers,
+          body: input.body,
+          credentials: input.credentials,
+          signal: input.signal,
+          mode: input.mode,
+          cache: input.cache,
+          redirect: input.redirect,
+          referrer: input.referrer,
+          referrerPolicy: input.referrerPolicy,
+          integrity: input.integrity,
+          keepalive: input.keepalive,
+        };
+        if (input.body) reqInit.duplex = 'half';
+        input = new Request(cleaned, reqInit);
+      }
     }
     return origFetch(input, init);
   };
