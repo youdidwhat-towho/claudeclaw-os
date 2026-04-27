@@ -12,10 +12,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      # SHA-pinned (audit #13) — `@v4` major-tag could be force-pushed.
+      # checkout v4.2.2; setup-node v4.1.0
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
         with:
           node-version: 20
           cache: npm
@@ -34,16 +36,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: build
-    # Currently informational only. The skill-registry.test.ts suite has
-    # 7 known-failing tests because its setup leaks into real ~/.claude/skills
-    # paths instead of fully isolating to its tempRoot. Tracked for cleanup
-    # under audit finding L-5; once fixed, drop continue-on-error here.
-    continue-on-error: true
+    # Test job is now must-pass. The 7 known-failing skill-registry tests
+    # are explicitly marked .skip in the source file pending L-5 isolation
+    # cleanup, so any new failure surfaces here instead of being masked by
+    # continue-on-error.
     steps:
-      - uses: actions/checkout@v4
+      # SHA-pinned (audit #13) — `@v4` major-tag could be force-pushed.
+      # checkout v4.2.2; setup-node v4.1.0
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
         with:
           node-version: 20
           cache: npm
