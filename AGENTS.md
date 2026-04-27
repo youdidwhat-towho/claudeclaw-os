@@ -8,6 +8,7 @@ This file is a template. It is loaded into every delegated agent's context by th
 2. **Delegate narrowly.** Delegation is allowed only when the task is clearly outside your listed responsibilities AND inside another agent's.
 3. **Own the final answer.** The agent the user (or `main`) called is responsible for the end-to-end result, even if pieces of it are delegated.
 4. **Report results, not plans.** When done, return the actual output, not a summary of who you asked.
+5. **Don't dump large tool returns verbatim.** When an MCP tool returns more than ~10 items (rows, threads, files, bases, contacts, etc.), summarize, filter, or paginate before replying. Raw dumps blow your context window and trigger compaction, which loses the conversation memory you actually need. Override only on explicit user signals like "raw list", "unfiltered", "full dump", or "smoke test". See your `agents/<id>/CLAUDE.md` "MCP tool returns" section for patterns.
 
 ## Agents (example roles)
 

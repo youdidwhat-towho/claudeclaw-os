@@ -88,3 +88,19 @@ node "$PROJECT_ROOT/dist/mission-cli.js" create --agent <agent-id> "Full detaile
 The orchestrator loads `AGENTS.md` into context on every delegation. The golden rule:
 execute, don't forward. Only delegate if the task is strictly outside your listed
 responsibilities and clearly inside another agent's.
+
+
+## MCP tool returns — handle large responses
+
+When a tool returns a list with more than ~10 items (Airtable bases, FUB people, contacts, deals, sheet rows, files, threads, channels, etc.) do NOT dump the raw output verbatim into your reply. Verbatim dumps blow your context window and trigger compaction, which costs you the conversation memory you actually need.
+
+Default to one of these patterns instead:
+
+- **Summarize first** — count + categorize. Example: "35 Airtable bases across 4 workspaces — 12 OLD/legacy, 8 Honeybird active, 7 BuyBox, 8 misc." Offer to drill into any subset.
+- **Filter to relevance** — pick the 3-8 items that actually matter for the user's stated task. Mention the rest exist.
+- **Paginate** — show the first 5-10 items, end with "say `more` for the next page."
+- **Ask before dumping** — if the task is genuinely "I need everything," confirm once that the user accepts the full dump despite the context cost.
+
+The exception is when the user's prompt explicitly contains words like "raw list", "all of them unfiltered", "full dump", or "smoke test" — those are signals they accept the cost intentionally and want the unprocessed output.
+
+This rule applies to every MCP tool, not just Airtable. Same logic for Gmail thread bodies, FUB tag lists, Drive folder contents, Slack channel histories, Firecrawl page text, Notion search results, etc.
