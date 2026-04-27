@@ -807,8 +807,19 @@ const API_BASE = window.location.origin;
 // H-3: auto-migrate fetch calls from ?token= URL param to Authorization: Bearer header.
 // Reduces token leakage via referer, browser history, and server access logs.
 // EventSource and <img> src still carry ?token= (browser API limitation on those types).
+//
+// Same-origin guard: only inject the Authorization header when the request
+// targets the dashboard's own origin. Without this, any cross-origin fetch
+// whose URL happens to contain '/api/' or '/warroom' (third-party APIs, CDN
+// paths, etc.) would silently receive the dashboard token and exfiltrate it.
 (function() {
   const origFetch = window.fetch.bind(window);
+  function isSameOrigin(rawUrl) {
+    try {
+      const u = new URL(rawUrl, location.origin);
+      return u.origin === location.origin;
+    } catch (e) { return false; }
+  }
   function stripToken(rawUrl) {
     try {
       const u = new URL(rawUrl, location.origin);
@@ -821,7 +832,7 @@ const API_BASE = window.location.origin;
   window.fetch = function(input, init) {
     init = init || {};
     const url = (typeof input === 'string') ? input : (input && input.url) || '';
-    if (/\\/(api|warroom)/.test(url)) {
+    if (isSameOrigin(url)) {
       const cleaned = stripToken(url);
       const headers = new Headers(init.headers || (typeof input !== 'string' && input.headers) || {});
       if (!headers.has('Authorization')) headers.set('Authorization', 'Bearer ' + TOKEN);

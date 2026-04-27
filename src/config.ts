@@ -21,6 +21,7 @@ const envConfig = readEnvFile([
   'DASHBOARD_PORT',
   'DASHBOARD_TOKEN',
   'DASHBOARD_URL',
+  'DASHBOARD_ALLOWED_ORIGINS',
   'CLAUDECLAW_CONFIG',
   'DB_ENCRYPTION_KEY',
   'GOOGLE_API_KEY',
@@ -206,6 +207,15 @@ export const DASHBOARD_TOKEN =
   process.env.DASHBOARD_TOKEN || envConfig.DASHBOARD_TOKEN || '';
 export const DASHBOARD_URL =
   process.env.DASHBOARD_URL || envConfig.DASHBOARD_URL || '';
+// Extra origins allowed to call the dashboard's CORS surface (comma-separated).
+// Localhost variants and *.trycloudflare.com tunnels are allowed by default in
+// dashboard.ts; this is the env-configurable extension for custom domains.
+export const DASHBOARD_ALLOWED_ORIGINS = (
+  process.env.DASHBOARD_ALLOWED_ORIGINS || envConfig.DASHBOARD_ALLOWED_ORIGINS || ''
+)
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
 
 // Database encryption key (SQLCipher). Required for encrypted database access.
 export const DB_ENCRYPTION_KEY =

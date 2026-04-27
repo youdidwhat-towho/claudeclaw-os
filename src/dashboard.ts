@@ -5,7 +5,7 @@ import { serve } from '@hono/node-server';
 
 import fs from 'fs';
 import path from 'path';
-import { AGENT_ID, ALLOWED_CHAT_ID, DASHBOARD_PORT, DASHBOARD_TOKEN, MESSENGER_TYPE, PROJECT_ROOT, STORE_DIR, WHATSAPP_ENABLED, SLACK_USER_TOKEN, CONTEXT_LIMIT, agentDefaultModel } from './config.js';
+import { AGENT_ID, ALLOWED_CHAT_ID, DASHBOARD_PORT, DASHBOARD_TOKEN, DASHBOARD_ALLOWED_ORIGINS, MESSENGER_TYPE, PROJECT_ROOT, STORE_DIR, WHATSAPP_ENABLED, SLACK_USER_TOKEN, CONTEXT_LIMIT, agentDefaultModel } from './config.js';
 import crypto from 'crypto';
 import {
   getAllScheduledTasks,
@@ -120,11 +120,33 @@ export function startDashboard(botApi?: Api<RawApi>): void {
 
   const app = new Hono();
 
-  // CORS headers for cross-origin access (Cloudflare tunnel, mobile browsers)
+  // CORS headers — locked to a small allowlist instead of the wildcard `*`.
+  // The wildcard combined with auto-injected Authorization on the client side
+  // would let any origin the user visits issue authenticated POSTs to this
+  // dashboard via fetch — a CSRF surface. The allowlist covers:
+  //   - localhost and 127.0.0.1 on any port (dev + the agent itself)
+  //   - *.trycloudflare.com (the most common tunneling host)
+  //   - additional origins from DASHBOARD_ALLOWED_ORIGINS env (comma-separated)
+  // Requests from origins not on the list get no Access-Control-Allow-Origin
+  // header, which the browser treats as a same-origin policy violation and
+  // refuses to deliver the response to JS.
+  function isAllowedOrigin(origin: string): boolean {
+    if (!origin) return false;
+    try {
+      const u = new URL(origin);
+      if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') return true;
+      if (u.hostname.endsWith('.trycloudflare.com')) return true;
+      return DASHBOARD_ALLOWED_ORIGINS.includes(origin);
+    } catch { return false; }
+  }
   app.use('*', async (c, next) => {
-    c.header('Access-Control-Allow-Origin', '*');
-    c.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, PATCH, OPTIONS');
-    c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    const origin = c.req.header('Origin') || '';
+    if (origin && isAllowedOrigin(origin)) {
+      c.header('Access-Control-Allow-Origin', origin);
+      c.header('Vary', 'Origin');
+      c.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, PATCH, OPTIONS');
+      c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    }
     if (c.req.method === 'OPTIONS') return c.body(null, 204);
     await next();
   });
@@ -139,12 +161,23 @@ export function startDashboard(botApi?: Api<RawApi>): void {
   // avoids token leakage via referer/history/access logs) OR ?token= query param
   // (backward compat for top-level page loads, image src, EventSource — request
   // types where the browser cannot set custom headers).
+  //
+  // Comparison uses crypto.timingSafeEqual to prevent localhost timing-attack
+  // enumeration of the token byte-by-byte. timingSafeEqual throws if the two
+  // buffers differ in length, so we length-check up front and fall through to
+  // 401 on mismatch — that early return is itself constant-time (no per-byte
+  // branch) which is the property timingSafeEqual is built to preserve.
   app.use('*', async (c, next) => {
     const headerAuth = c.req.header('Authorization') || '';
     const headerToken = headerAuth.startsWith('Bearer ') ? headerAuth.slice(7).trim() : '';
     const queryToken = c.req.query('token') || '';
     const token = headerToken || queryToken;
-    if (!DASHBOARD_TOKEN || !token || token !== DASHBOARD_TOKEN) {
+    if (!DASHBOARD_TOKEN || !token) {
+      return c.json({ error: 'Unauthorized' }, 401);
+    }
+    const a = Buffer.from(token);
+    const b = Buffer.from(DASHBOARD_TOKEN);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
       return c.json({ error: 'Unauthorized' }, 401);
     }
     await next();
