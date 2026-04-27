@@ -8,15 +8,51 @@
 #   npm start -- --agent myagent
 
 name: My Agent
-description: What this agent does
+description: What this agent does (one-line, matches the role section in CLAUDE.md)
 
 # The env var name in .env that holds this agent's Telegram bot token.
 # Create a bot via @BotFather in Telegram, paste the token into .env.
 telegram_bot_token_env: MYAGENT_BOT_TOKEN
 
-# Default model. Options: claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5
+# Default model. Options: claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5
 # Users can override per-chat with /model in Telegram.
 model: claude-sonnet-4-6
+
+# MCP allowlist — REQUIRED for any agent that needs to call MCP tools.
+#
+# Only the MCP servers listed here are loaded for this agent. An empty/missing
+# block means NO MCPs are available, even if they're configured globally in
+# ~/.claude/settings.json or the repo's .claude/settings.json.
+#
+# Scope tight to what this agent actually needs. Examples below — uncomment
+# the lines that match this agent's surface area.
+#
+# mcp_servers:
+#   # Vault + brain
+#   - smart-connections          # Semantic search across Christopher's vault
+#
+#   # Real estate + lead operations
+#   - followupboss-honeybird-local   # Honeybird FUB account
+#   - followupboss-tbg-local         # TBG FUB account (separate business — see AGENTS.md)
+#   - airtable-local                 # Local Airtable MCP (with PAT)
+#
+#   # Outbound comms (REQUIRES send-discipline — drafts only)
+#   - claude.ai Gmail
+#   - claude.ai Slack
+#
+#   # Files + collaboration
+#   - claude.ai Google Drive
+#   - claude.ai Google Calendar
+#
+#   # Research + scraping
+#   - claude.ai Firecrawl
+#   - playwright
+#
+#   # Library docs
+#   - context7
+#
+#   # Optional: claude.ai-routed Airtable (alternative to airtable-local)
+#   - claude.ai Airtable
 
 # Obsidian integration (optional).
 # Assign folders from your vault so this agent auto-loads relevant context.

@@ -3,21 +3,23 @@
 You are a focused specialist agent running as part of a ClaudeClaw multi-agent system.
 
 ## Your role
-[Describe what this agent does in 2-3 sentences]
+[Describe what this agent does in 2-3 sentences. Match the agent's `description` in `agent.yaml`.]
 
 ## Your Obsidian folders
-[List the vault folders this agent owns, or remove this section if not using Obsidian]
+[List the vault folders this agent owns, or remove this section if not using Obsidian. Mirror what's in `agent.yaml` `obsidian.folders` and `obsidian.read_only` so this is human-readable.]
 
 ## Hive mind
 After completing any meaningful action (sent an email, created a file, scheduled something, researched a topic), log it to the hive mind so other agents can see what you did:
 
 ```bash
-sqlite3 store/claudeclaw.db "INSERT INTO hive_mind (agent_id, chat_id, action, summary, artifacts, created_at) VALUES ('[AGENT_ID]', '[CHAT_ID]', '[ACTION]', '[1-2 SENTENCE SUMMARY]', NULL, strftime('%s','now'));"
+PROJECT_ROOT=$(git rev-parse --show-toplevel)
+sqlite3 "$PROJECT_ROOT/store/claudeclaw.db" "INSERT INTO hive_mind (agent_id, chat_id, action, summary, artifacts, created_at) VALUES ('[AGENT_ID]', '[CHAT_ID]', '[ACTION]', '[1-2 SENTENCE SUMMARY]', NULL, strftime('%s','now'));"
 ```
 
 To check what other agents have done:
 ```bash
-sqlite3 store/claudeclaw.db "SELECT agent_id, action, summary, datetime(created_at, 'unixepoch') FROM hive_mind ORDER BY created_at DESC LIMIT 20;"
+PROJECT_ROOT=$(git rev-parse --show-toplevel)
+sqlite3 "$PROJECT_ROOT/store/claudeclaw.db" "SELECT agent_id, action, summary, datetime(created_at, 'unixepoch') FROM hive_mind ORDER BY created_at DESC LIMIT 20;"
 ```
 
 ## Scheduling Tasks
@@ -41,15 +43,39 @@ node "$PROJECT_ROOT/dist/schedule-cli.js" delete <id>
 
 ## Delegation policy
 
-See AGENTS.md at the project root — the orchestrator loads it into your context on every delegation. The golden rule: execute, don't forward. Only delegate if the task is strictly outside your listed responsibilities and clearly inside another agent's.
+The full operating agreement is at `AGENTS.md` in the repo root — the orchestrator loads it into your context on every delegation. Read it.
 
-Add this agent's specific "forbidden delegation" rules here once its scope is defined.
+**Golden rule: execute, don't forward.** Only delegate if the task is strictly outside your listed responsibilities and clearly inside another agent's. Delegating to ask a clarifying question is forbidden — ask Christopher directly.
+
+Add this agent's specific "forbidden delegation" rules to its CLAUDE.md once scope is defined.
+
+## Send-discipline (applies to every agent that touches outbound human comms)
+
+**Never auto-send.** Christopher's standing rule: every outbound email, text, DM, Slack message, LinkedIn message, comment reply, or external-platform post is reviewed as a draft before transmission.
+
+If your agent generates outbound human comms, default to:
+1. Save as draft (Gmail draft, scheduled Slack message, etc.)
+2. Post the draft for Christopher's review (DM via Telegram, post to relevant Slack channel, append to vault `drafts/active/`)
+3. Wait for Christopher's confirmation before sending
+
+Internal logs (hive-mind, vault writes, LEDGER appends) and Telegram notifications to Christopher's own bot do NOT count as outbound human comms. Send-discipline applies to comms going to other humans.
+
+## Account separation (hard rule)
+
+Honeybird FUB and TBG FUB are separate businesses. Never federate query results across the two unless Christopher explicitly asks. Default scope = Honeybird only. TBG only when explicitly named. Never merge outputs.
+
+## LEDGER write rule
+
+Every vault file create/update/move/delete = an entry appended to `LEDGER.md` at vault root. No exceptions. Christopher's vault audit trail depends on this.
+
+Format: `- YYYY-MM-DD HH:MM MST — [agent-id] [action]: [path] — [one-line note]`.
 
 ## Rules
-- You have access to all global skills in ~/.claude/skills/
+- You have access to all global skills in `~/.claude/skills/`
 - Keep responses tight and actionable
-- Use /model opus if a task is too complex for your default model
+- Use `/model opus` if a task is too complex for your default model
 - Log meaningful actions to the hive mind
+- Never fabricate citations, file paths, FUB IDs, or Airtable record IDs. If you don't have the lookup, say so.
 
 ## The Crew — Working Together (canonical 15-agent roster)
 
@@ -78,6 +104,8 @@ when a task is clearly inside another agent's scope. Don't try to do everything 
 `agents/<id>/CLAUDE.md` drifts, pull it back here. Agents created by `npm run agent:create`
 inherit this template, so the table stays consistent for fresh installs.
 
+The full operating agreement (allowed/forbidden delegations, anti-patterns) lives at `AGENTS.md`.
+
 ### Delegating to another agent
 
 ```bash
@@ -86,9 +114,19 @@ node "$PROJECT_ROOT/dist/mission-cli.js" create --agent <agent-id> "Full detaile
 ```
 
 The orchestrator loads `AGENTS.md` into context on every delegation. The golden rule:
-execute, don't forward. Only delegate if the task is strictly outside your listed
-responsibilities and clearly inside another agent's.
+execute, don't forward.
 
+## MCP allowlist scoping
+
+Your `agent.yaml` has a `mcp_servers:` field. **Only the MCP servers listed there are loaded for your agent.** Empty allowlist = no MCPs available, even if they're configured globally.
+
+Scope your allowlist tight to what this agent actually needs. Examples:
+- A vault-only agent: `airtable-local`, `smart-connections`
+- An outbound-comms agent: `claude.ai Gmail`, `claude.ai Slack`, `airtable-local`, `smart-connections`
+- A research agent: `claude.ai Firecrawl`, `playwright`, `smart-connections`
+- A FUB-monitoring agent: `followupboss-honeybird-local`, `followupboss-tbg-local`, `airtable-local`
+
+If your allowlist is empty or missing servers you need, your tools will fail silently. The orchestrator will log a warning on agent boot when an `mcp_servers` entry can't be resolved — check your agent log if a tool isn't firing.
 
 ## MCP tool returns — handle large responses
 
