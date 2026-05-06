@@ -400,9 +400,16 @@ describe('GET /api/security/status', () => {
 });
 
 describe('GET /api/chat/history', () => {
-  it('rejects missing chatId with 400', async () => {
+  // Fork-original UX behavior: missing chatId returns empty turns rather
+  // than 400, so the dashboard can open without ?chatId without surfacing
+  // an error to the user. Upstream's stricter 400 was reverted; keep the
+  // test aligned with the handler comment in src/dashboard.ts.
+  it('returns empty turns when chatId is missing', async () => {
     const res = await get('/api/chat/history');
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
+    const body = await jsonOf(res);
+    expect(body).toMatchObject({ turns: expect.any(Array) });
+    expect(body.turns).toHaveLength(0);
   });
 
   it('returns { turns: [] } with chatId', async () => {

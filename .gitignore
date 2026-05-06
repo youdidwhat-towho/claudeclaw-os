@@ -120,3 +120,9 @@ agents/*/agent.yaml.backup
 # CWDs (sub-agents start with cwd=agents/<id>).
 .claude/claudex/
 agents/*/.claude/claudex/
+
+# Fork-specific additions (preserved from fork-side gitignore)
+*.workspace-backup
+.claude/settings.json
+.claude/settings.local.json
+.playwright-mcp/
