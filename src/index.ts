@@ -3,7 +3,9 @@ import path from 'path';
 
 import { loadAgentConfig, listAgentIds, resolveAgentDir, resolveAgentClaudeMd, refreshWarRoomRoster } from './agent-config.js';
 import { createBot } from './bot.js';
-import { checkPendingMigrations } from './migrations.js';
+// Note: migrations.js + checkPendingMigrations() removed in fork audit fix M-1
+// (commit 344ed4b — versioned-migration subsystem deleted as unused). The
+// runMigrations() pattern in db.ts handles all schema work now.
 import { ALLOWED_CHAT_ID, activeBotToken, STORE_DIR, PROJECT_ROOT, CLAUDECLAW_CONFIG, GOOGLE_API_KEY, setAgentOverrides, SECURITY_PIN_HASH, IDLE_LOCK_MINUTES, EMERGENCY_KILL_PHRASE, WARROOM_ENABLED, WARROOM_PORT } from './config.js';
 import { startDashboard } from './dashboard.js';
 import { initDatabase, cleanupOldMissionTasks, insertAuditLog } from './db.js';
@@ -105,8 +107,6 @@ function releaseLock(): void {
 }
 
 async function main(): Promise<void> {
-  
-  checkPendingMigrations(PROJECT_ROOT);
 
   if (AGENT_ID === 'main') {
     showBanner();
