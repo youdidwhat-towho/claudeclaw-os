@@ -1944,8 +1944,19 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
       } catch { /* not running */ }
     }
     const mainStats = getAgentTokenStats('main');
+    // Fork: load main's name/description from agents/main/agent.yaml so the
+    // primary agent's branding tracks the yaml (Brad in this fork) instead
+    // of the hardcoded upstream default. Falls back to upstream defaults if
+    // the yaml can't be read.
+    let mainName = 'Main';
+    let mainDescription = 'Primary ClaudeClaw bot';
+    try {
+      const mainCfg = loadAgentConfig('main');
+      if (mainCfg?.name) mainName = mainCfg.name;
+      if (mainCfg?.description) mainDescription = mainCfg.description;
+    } catch { /* fall back to upstream defaults */ }
     const allAgents = [
-      { id: 'main', name: 'Main', description: 'Primary ClaudeClaw bot', model: getMainModelOverride() ?? 'claude-opus-4-6', running: mainRunning, todayTurns: mainStats.todayTurns, todayCost: mainStats.todayCost, avatar_etag: avatarEtagForId('main') },
+      { id: 'main', name: mainName, description: mainDescription, model: getMainModelOverride() ?? 'claude-opus-4-6', running: mainRunning, todayTurns: mainStats.todayTurns, todayCost: mainStats.todayCost, avatar_etag: avatarEtagForId('main') },
       ...agents,
     ];
 
@@ -2363,9 +2374,10 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
     const agentMeta: Array<{ id: string; description: string; rawCount: number; recentSummaries: string[] }> = [];
     for (const id of liveAgents) {
       let description = '';
-      if (id !== 'main') {
-        try { description = loadAgentConfig(id).description || ''; } catch { /* skip */ }
-      } else {
+      // Fork: load main's description from agents/main/agent.yaml so the
+      // suggestion refresh uses the same source as /api/agents.
+      try { description = loadAgentConfig(id).description || ''; } catch { /* skip */ }
+      if (id === 'main' && !description) {
         description = 'Primary ClaudeClaw bot — general triage and routing';
       }
       const entries = getHiveMindEntries(200, id);
