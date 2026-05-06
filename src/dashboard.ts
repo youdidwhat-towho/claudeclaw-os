@@ -783,8 +783,10 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
     const nextAgent = body.agent !== undefined ? body.agent : (current.agent ?? 'main');
     const nextMode = body.mode !== undefined ? body.mode : current.mode;
 
-    if (!getValidPinAgents().has(nextAgent)) {
-      return c.json({ ok: false, error: 'invalid agent; must be one of main, research, comms, content, ops' }, 400);
+    const validPinAgents = getValidPinAgents();
+    if (!validPinAgents.has(nextAgent)) {
+      const list = [...validPinAgents].join(', ');
+      return c.json({ ok: false, error: `invalid agent; must be one of ${list}` }, 400);
     }
     if (!VALID_PIN_MODES.has(nextMode)) {
       return c.json({ ok: false, error: 'invalid mode; must be one of direct, auto' }, 400);
@@ -1925,7 +1927,7 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
           id,
           name: config.name,
           description: config.description,
-          model: mainOverride ?? config.model ?? 'claude-opus-4-6',
+          model: mainOverride ?? config.model ?? 'claude-opus-4-7',
           running,
           todayTurns: stats.todayTurns,
           todayCost: stats.todayCost,
@@ -1961,7 +1963,7 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
       if (mainCfg?.description) mainDescription = mainCfg.description;
     } catch { /* fall back to upstream defaults */ }
     const allAgents = [
-      { id: 'main', name: mainName, description: mainDescription, model: getMainModelOverride() ?? 'claude-opus-4-6', running: mainRunning, todayTurns: mainStats.todayTurns, todayCost: mainStats.todayCost, avatar_etag: avatarEtagForId('main') },
+      { id: 'main', name: mainName, description: mainDescription, model: getMainModelOverride() ?? 'claude-opus-4-7', running: mainRunning, todayTurns: mainStats.todayTurns, todayCost: mainStats.todayCost, avatar_etag: avatarEtagForId('main') },
       ...agents,
     ];
 
@@ -2001,7 +2003,7 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
     const model = body?.model?.trim();
     if (!model) return c.json({ error: 'model required' }, 400);
 
-    const validModels = ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5'];
+    const validModels = ['claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5'];
     if (!validModels.includes(model)) return c.json({ error: `Invalid model` }, 400);
 
     const agentIds = listAgentIds();
@@ -2026,7 +2028,7 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
     const model = body?.model?.trim();
     if (!model) return c.json({ error: 'model required' }, 400);
 
-    const validModels = ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5'];
+    const validModels = ['claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5'];
     if (!validModels.includes(model)) return c.json({ error: `Invalid model. Valid: ${validModels.join(', ')}` }, 400);
 
     try {

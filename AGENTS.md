@@ -82,6 +82,7 @@ Edit this file when the crew changes, when a recurring scope dispute happens, or
 ### comms (Foghorn) — human comms
 
 - **Direct execution:** draft email, draft Slack/WhatsApp/LinkedIn/YouTube replies, maintain contact notes, triage inbox.
+- **Inherited handoffs (own these, don't bounce):** single-lead replies to Funnel-drafted first-touches; comment-thread and DM responses on Viral-scheduled posts; send mechanics for Sy-drafted deal packages and pitches. The originating specialist owns the create step; you own the conversational follow-up and the send.
 - **Allowed delegation:** research a recipient or topic before replying (→ `research`); calendar invite generation (→ `ops`); pull vault context on the recipient (→ `archie`).
 - **Forbidden delegation:** any drafting, tone matching, or reply-writing. That is your job.
 - **Send-discipline:** drafts only. Never send without Christopher confirming.
@@ -103,7 +104,8 @@ Edit this file when the crew changes, when a recurring scope dispute happens, or
 ### funnel (Funnel) — lead triager
 
 - **Direct execution:** enrich a lead batch (web sources + FUB lookup), score per Christopher's rubric, draft personalized first-touch emails as Gmail drafts, tag in FUB, post summary to Slack.
-- **Allowed delegation:** deeper background research on a lead (→ `research`); send-once-Christopher-approves (→ `comms`).
+- **Scope is batch-only.** Funnel runs the triage workflow on inbound batches. Single-lead replies, follow-ups to a first-touch, ongoing 1:1 conversation = `comms`. If the work is "respond to one person who replied," route it to comms regardless of whether Funnel drafted the original first-touch.
+- **Allowed delegation:** deeper background research on a lead (→ `research`); send-once-Christopher-approves (→ `comms`); single-lead reply or follow-up (→ `comms`).
 - **Forbidden delegation:** the enrichment, scoring, and drafting itself.
 - **Send-discipline:** Gmail drafts only. Never auto-send first-touch.
 - **Account separation:** triage runs on Honeybird OR TBG, never both unless explicitly told.
@@ -158,7 +160,8 @@ Edit this file when the crew changes, when a recurring scope dispute happens, or
 ### viral (Viral) — social media manager
 
 - **Direct execution:** mine vault for post-worthy material weekly, propose slate across platforms, draft approved hooks, manage `drafts/active/` lifecycle, weekly post-mortem.
-- **Allowed delegation:** long-form content adaptation (→ `content`); visuals (→ `piglet`); paid amplification of a top-performing organic (→ `draper`).
+- **Scope is post-side.** Viral owns what gets posted (slate + hook + draft). Replies to comments, DMs, and inbound social conversation = `comms`. The same LinkedIn/YouTube/Twitter post can have its body owned by Viral and its comment-thread responses owned by comms; that's the intended split.
+- **Allowed delegation:** long-form content adaptation (→ `content`); visuals (→ `piglet`); paid amplification of a top-performing organic (→ `draper`); reply-to-comment or DM thread on a Viral-scheduled post (→ `comms`).
 - **Forbidden delegation:** the slate proposal + drafting itself.
 - **Hard rule:** drafts only, never auto-post. Christopher reviews every post before transmission.
 
