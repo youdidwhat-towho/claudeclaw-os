@@ -1901,7 +1901,12 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
 
   // List all configured agents with status
   app.get('/api/agents', (c) => {
-    const agentIds = listAgentIds();
+    // Fork: filter out 'main' from the directory walk because it gets
+    // rendered separately below via the hardcoded main-bot entry. Without
+    // this filter, forks that maintain agents/main/ for crew config end
+    // up with main appearing twice (one from yaml, one from inject) with
+    // different PID files producing inconsistent running status.
+    const agentIds = listAgentIds().filter((id) => id !== 'main');
     const agents = agentIds.map((id) => {
       try {
         const config = loadAgentConfig(id);
