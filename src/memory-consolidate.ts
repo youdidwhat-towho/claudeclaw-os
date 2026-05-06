@@ -78,9 +78,7 @@ export async function runConsolidation(chatId: string): Promise<void> {
       entities: JSON.parse(m.entities),
       topics: JSON.parse(m.topics),
       importance: m.importance,
-      created_at: typeof m.created_at === 'number' && Number.isFinite(m.created_at)
-        ? new Date(m.created_at * 1000).toISOString()
-        : new Date(0).toISOString(),
+      created_at: new Date(m.created_at * 1000).toISOString(),
     }));
 
     const prompt = CONSOLIDATION_PROMPT.replace(

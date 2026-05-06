@@ -11,12 +11,11 @@ vi.mock('./db.js', () => ({
   decayMemories: vi.fn(),
   logConversationTurn: vi.fn(),
   pruneConversationLog: vi.fn(),
-  pruneWaMessages: vi.fn(() => ({ messages: 0, outbox: 0, outboxUnsent: 0, map: 0 })),
+  pruneWaMessages: vi.fn(() => ({ messages: 0, outbox: 0, map: 0 })),
   pruneSlackMessages: vi.fn(() => 0),
+  pruneWarRoomMeetings: vi.fn(() => ({ meetings: 0, convLog: 0 })),
   searchConsolidations: vi.fn(),
   getRecentConsolidations: vi.fn(),
-  getSystemValue: vi.fn(() => undefined),
-  setSystemValue: vi.fn(),
 }));
 
 vi.mock('./memory-ingest.js', () => ({

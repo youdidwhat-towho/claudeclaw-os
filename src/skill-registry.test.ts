@@ -55,15 +55,8 @@ afterEach(() => {
 
 // ── Scan and discovery ──────────────────────────────────────────────
 
-// NOTE: 7 tests below are marked .skip pending L-5 isolation cleanup.
-// The registry module resolves its scan paths via import.meta.url at
-// import time, which leaks into the real ~/.claude/skills/ path instead
-// of fully respecting the per-test tempRoot/tempGlobal HOME override.
-// Tracked as audit follow-up; once the registry takes injectable paths
-// these tests can be re-enabled. See .github/workflows/test.yml note.
-
 describe('initSkillRegistry', () => {
-  it.skip('finds skills in a scanned directory', () => {
+  it('finds skills in a scanned directory', () => {
     writeSkill(
       path.join(tempRoot, 'skills'),
       'gmail',
@@ -95,7 +88,7 @@ triggers: email, inbox, gmail
 Read and send emails.`,
     );
 
-    initSkillRegistry();
+    initSkillRegistry(tempRoot);
     const all = getAllSkills();
     // Should find at least the global skill
     const gmailSkill = all.find((s) => s.id === 'gmail');
@@ -107,11 +100,11 @@ Read and send emails.`,
     expect(gmailSkill!.triggerWords).toContain('gmail');
   });
 
-  it.skip('handles missing skill directories gracefully', () => {
+  it('handles missing skill directories gracefully', () => {
     // Remove the skills dirs so there is nothing to scan
     fs.rmSync(path.join(tempGlobal, '.claude', 'skills'), { recursive: true, force: true });
     // initSkillRegistry should not throw
-    expect(() => initSkillRegistry()).not.toThrow();
+    expect(() => initSkillRegistry(tempRoot)).not.toThrow();
     expect(getAllSkills()).toHaveLength(0);
   });
 });
@@ -133,7 +126,7 @@ triggers: schedule, meeting, calendar
 Create and manage events.`,
     );
 
-    initSkillRegistry();
+    initSkillRegistry(tempRoot);
     const cal = getAllSkills().find((s) => s.id === 'calendar');
     expect(cal).toBeDefined();
     expect(cal!.name).toBe('Google Calendar');
@@ -154,7 +147,7 @@ Show outstanding tasks from the vault. Supports checkboxes.
 Run /todo to see tasks.`,
     );
 
-    initSkillRegistry();
+    initSkillRegistry(tempRoot);
     const todo = getAllSkills().find((s) => s.id === 'todo');
     expect(todo).toBeDefined();
     expect(todo!.name).toBe('Task Manager');
@@ -168,7 +161,7 @@ Run /todo to see tasks.`,
       'Just some plain text content here.',
     );
 
-    initSkillRegistry();
+    initSkillRegistry(tempRoot);
     const skill = getAllSkills().find((s) => s.id === 'my-skill');
     expect(skill).toBeDefined();
     expect(skill!.name).toBe('my-skill');
@@ -199,10 +192,10 @@ triggers: schedule, meeting, calendar
 ---`,
     );
 
-    initSkillRegistry();
+    initSkillRegistry(tempRoot);
   });
 
-  it.skip('matches "check my email" to gmail skill', () => {
+  it('matches "check my email" to gmail skill', () => {
     const matches = matchSkills('check my email');
     expect(matches.length).toBeGreaterThanOrEqual(1);
     expect(matches.some((s) => s.id === 'gmail')).toBe(true);
@@ -219,7 +212,7 @@ triggers: schedule, meeting, calendar
     expect(matches).toHaveLength(0);
   });
 
-  it.skip('is case-insensitive', () => {
+  it('is case-insensitive', () => {
     const matches = matchSkills('Check My EMAIL');
     expect(matches.some((s) => s.id === 'gmail')).toBe(true);
   });
@@ -228,7 +221,7 @@ triggers: schedule, meeting, calendar
 // ── getSkillIndex ───────────────────────────────────────────────────
 
 describe('getSkillIndex', () => {
-  it.skip('returns compact skill_id: description format', () => {
+  it('returns compact skill_id: description format', () => {
     writeSkill(
       path.join(tempGlobal, '.claude', 'skills'),
       'gmail',
@@ -239,14 +232,14 @@ triggers: email
 ---`,
     );
 
-    initSkillRegistry();
+    initSkillRegistry(tempRoot);
     const index = getSkillIndex();
     expect(index).toContain('gmail: Email management');
   });
 
-  it.skip('returns empty string when no skills', () => {
+  it('returns empty string when no skills', () => {
     fs.rmSync(path.join(tempGlobal, '.claude', 'skills'), { recursive: true, force: true });
-    initSkillRegistry();
+    initSkillRegistry(tempRoot);
     expect(getSkillIndex()).toBe('');
   });
 });
@@ -254,7 +247,7 @@ triggers: email
 // ── getSkillInstructions ────────────────────────────────────────────
 
 describe('getSkillInstructions', () => {
-  it.skip('returns full SKILL.md content', () => {
+  it('returns full SKILL.md content', () => {
     const content = `---
 name: Gmail
 description: Email management
@@ -266,13 +259,13 @@ Full instructions here.`;
 
     writeSkill(path.join(tempGlobal, '.claude', 'skills'), 'gmail', content);
 
-    initSkillRegistry();
+    initSkillRegistry(tempRoot);
     const instructions = getSkillInstructions('gmail');
     expect(instructions).toBe(content);
   });
 
   it('returns null for unknown skill ID', () => {
-    initSkillRegistry();
+    initSkillRegistry(tempRoot);
     expect(getSkillInstructions('nonexistent')).toBeNull();
   });
 });
@@ -285,7 +278,7 @@ describe('edge cases', () => {
     fs.mkdirSync(hiddenDir, { recursive: true });
     fs.writeFileSync(path.join(hiddenDir, 'SKILL.md'), '# Hidden');
 
-    initSkillRegistry();
+    initSkillRegistry(tempRoot);
     expect(getAllSkills().find((s) => s.id === '.hidden')).toBeUndefined();
   });
 
@@ -294,7 +287,7 @@ describe('edge cases', () => {
     fs.mkdirSync(emptyDir, { recursive: true });
     fs.writeFileSync(path.join(emptyDir, 'config.json'), '{}');
 
-    initSkillRegistry();
+    initSkillRegistry(tempRoot);
     expect(getAllSkills().find((s) => s.id === 'empty')).toBeUndefined();
   });
 
@@ -303,7 +296,7 @@ describe('edge cases', () => {
     fs.mkdirSync(skillDir, { recursive: true });
     fs.writeFileSync(path.join(skillDir, 'readme.md'), '# Alt Skill\n\nAlt description.');
 
-    initSkillRegistry();
+    initSkillRegistry(tempRoot);
     const alt = getAllSkills().find((s) => s.id === 'alt');
     expect(alt).toBeDefined();
     expect(alt!.name).toBe('Alt Skill');
