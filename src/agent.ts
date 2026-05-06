@@ -7,6 +7,8 @@ import { AGENT_MAX_TURNS, PROJECT_ROOT, agentCwd } from './config.js';
 import { readEnvFile } from './env.js';
 import { classifyError, AgentError } from './errors.js';
 import { logger } from './logger.js';
+import { getScrubbedSdkEnv } from './security.js';
+import { requireEnabled } from './kill-switches.js';
 
 // ── MCP server loading ──────────────────────────────────────────────
 // The Agent SDK's settingSources loads CLAUDE.md and permissions from
@@ -65,15 +67,6 @@ export function loadMcpServers(allowlist?: string[], projectCwd?: string): Recor
   // If an allowlist is provided, only keep the MCPs in that list
   if (allowlist) {
     const allowed = new Set(allowlist);
-    // Warn on silent-dropped MCPs: allowlisted names with no matching config.
-    // Catches typos, missing local-stdio installs, and cloud-only MCP names
-    // (e.g. Claude.ai connectors) that don't exist in any settings.json on disk.
-    const missing = allowlist.filter((name) => !(name in merged));
-    if (missing.length > 0) {
-      logger.warn(
-        `[mcp] allowlist references ${missing.length} MCP server(s) with no matching config in user/project settings.json: ${missing.join(', ')}`,
-      );
-    }
     for (const name of Object.keys(merged)) {
       if (!allowed.has(name)) delete merged[name];
     }
@@ -189,34 +182,23 @@ export async function runAgent(
   onStreamText?: (accumulatedText: string) => void,
   mcpAllowlist?: string[],
 ): Promise<AgentResult> {
+  // Centralized kill-switch enforcement. Throws KillSwitchDisabledError if
+  // LLM_SPAWN_ENABLED has been flipped off — caller is expected to surface
+  // a "feature disabled" message rather than retry. This is the SINGLE
+  // chokepoint for Telegram, scheduler, mission worker, and any other
+  // path that ends up here; the war-room and voice paths have their own
+  // requireEnabled calls at their own SDK boundaries.
+  requireEnabled('LLM_SPAWN_ENABLED');
+
   // Read secrets from .env without polluting process.env.
   // CLAUDE_CODE_OAUTH_TOKEN is optional — the subprocess finds auth via ~/.claude/
   // automatically. Only needed if you want to override which account is used.
   const secrets = readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
-
-  const sdkEnv: Record<string, string | undefined> = { ...process.env };
-
-  // Strip env vars set by a wrapping Claude Code session (e.g. when PM2 is
-  // started from inside a `claude` terminal). The nested subprocess inherits
-  // these and immediately exits with code 1 thinking it's a nested instance.
-  for (const key of [
-    'CLAUDECODE',
-    'CLAUDE_CODE_ENTRYPOINT',
-    'CLAUDE_CODE_EXECPATH',
-    'CLAUDE_CODE_SSE_PORT',
-    'CLAUDE_CODE_IPC_PORT',
-    'CLAUDE_CODE_MAX_OUTPUT_TOKENS',
-    'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS',
-  ]) {
-    delete sdkEnv[key];
-  }
-
-  if (secrets.CLAUDE_CODE_OAUTH_TOKEN) {
-    sdkEnv.CLAUDE_CODE_OAUTH_TOKEN = secrets.CLAUDE_CODE_OAUTH_TOKEN;
-  }
-  if (secrets.ANTHROPIC_API_KEY) {
-    sdkEnv.ANTHROPIC_API_KEY = secrets.ANTHROPIC_API_KEY;
-  }
+  // Strip secret-shaped env vars (DASHBOARD_TOKEN, third-party API keys,
+  // DB_ENCRYPTION_KEY, etc.) before handing process.env to the SDK
+  // subprocess. A prompt-injected agent that calls `env` or `cat .env`
+  // can otherwise read every credential the parent process holds.
+  const sdkEnv = getScrubbedSdkEnv(secrets);
 
   let newSessionId: string | undefined;
   let resultText: string | null = null;
@@ -253,13 +235,8 @@ export async function runAgent(
         // Resume the previous session for this chat (persistent context)
         resume: sessionId,
 
-        // 'project' loads CLAUDE.md from cwd; 'user' loads ~/.claude/skills/ and user settings.
-        // For non-main agents (agentCwd is defined), skip 'project' to prevent Claude Code from
-        // walking up the directory tree and loading the parent claudeclaw/CLAUDE.md (23KB of
-        // Brad-specific instructions irrelevant to sub-agents). Agent instructions are already
-        // injected via agentSystemPrompt prepend on new sessions, so 'project' is redundant
-        // and doubles startup context. Main agent keeps 'project' to load its own CLAUDE.md.
-        settingSources: agentCwd ? ['user'] : ['project', 'user'],
+        // 'project' loads CLAUDE.md from cwd; 'user' loads ~/.claude/skills/ and user settings
+        settingSources: ['project', 'user'],
 
         // Skip all permission prompts — this is a trusted personal bot on your own machine
         permissionMode: 'bypassPermissions',

@@ -120,14 +120,6 @@ function createSchema(database: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_consolidations_chat ON consolidations(chat_id, created_at DESC);
 
-    -- Audit #17: small kv store for system-level state. First user is the
-    -- decay sweep's NTP-rollback guard (last_decay_sweep_at). Add new keys
-    -- by convention: snake_case, owner-prefixed when scoped.
-    CREATE TABLE IF NOT EXISTS system_state (
-      key   TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-
     CREATE TABLE IF NOT EXISTS wa_message_map (
       telegram_msg_id INTEGER PRIMARY KEY,
       wa_chat_id      TEXT NOT NULL,
@@ -136,12 +128,11 @@ function createSchema(database: Database.Database): void {
     );
 
     CREATE TABLE IF NOT EXISTS wa_outbox (
-      id                INTEGER PRIMARY KEY AUTOINCREMENT,
-      to_chat_id        TEXT NOT NULL,
-      body              TEXT NOT NULL,
-      created_at        INTEGER NOT NULL,
-      sent_at           INTEGER,
-      last_attempted_at INTEGER
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      to_chat_id  TEXT NOT NULL,
+      body        TEXT NOT NULL,
+      created_at  INTEGER NOT NULL,
+      sent_at     INTEGER
     );
 
     CREATE INDEX IF NOT EXISTS idx_wa_outbox_unsent ON wa_outbox(sent_at) WHERE sent_at IS NULL;
@@ -219,8 +210,8 @@ function createSchema(database: Database.Database): void {
       prompt        TEXT NOT NULL,
       status        TEXT NOT NULL DEFAULT 'pending',
       result        TEXT,
-      created_at    INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
-      completed_at  INTEGER
+      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at  TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_inter_agent_tasks_status ON inter_agent_tasks(status, created_at DESC);
@@ -296,6 +287,58 @@ function createSchema(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(agent_id, created_at DESC);
 
+    -- Per-workspace personalization (workspace name, hotkey mod, mission
+    -- column order/widths, etc). Simple key/value with last-write-wins;
+    -- no auth scoping because the dashboard token is the auth boundary.
+    CREATE TABLE IF NOT EXISTS dashboard_settings (
+      key         TEXT PRIMARY KEY,
+      value       TEXT NOT NULL,
+      updated_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    );
+
+    -- Append-only version history for agent files edited from the
+    -- dashboard (CLAUDE.md, agent.yaml). Replaces the single-file .backup
+    -- approach so the user can browse prior versions and restore any.
+    -- file_kind is the editor's tab key ('claudemd' | 'agent-yaml').
+    -- Content stored inline; size cap is enforced at the API layer
+    -- (200KB for CLAUDE.md, 64KB for agent.yaml).
+    CREATE TABLE IF NOT EXISTS agent_file_history (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id    TEXT NOT NULL,
+      file_kind   TEXT NOT NULL,
+      content     TEXT NOT NULL,
+      byte_size   INTEGER NOT NULL,
+      sha256      TEXT NOT NULL,
+      author      TEXT NOT NULL DEFAULT 'dashboard',
+      created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_file_history_lookup
+      ON agent_file_history(agent_id, file_kind, created_at DESC);
+
+    -- LLM-generated suggestions for spinning off specialized agents.
+    -- The analyzer scans hive_mind activity grouped by agent_id and
+    -- spots when one agent is doing several distinct domains that
+    -- would benefit from being split. Each suggestion lives until the
+    -- user dismisses it (sets dismissed_at) or acts on it. We keep
+    -- dismissed rows so re-running analysis doesn't keep re-suggesting
+    -- the same split — the analyzer skips parents+IDs that already
+    -- have a non-superseded suggestion.
+    CREATE TABLE IF NOT EXISTS agent_suggestions (
+      id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+      from_agent            TEXT NOT NULL,
+      suggested_id          TEXT NOT NULL,
+      suggested_name        TEXT NOT NULL,
+      suggested_description TEXT NOT NULL,
+      reasoning             TEXT NOT NULL,
+      activity_share_pct    INTEGER,
+      created_at            INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      dismissed_at          INTEGER,
+      acted_at              INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_suggestions_active
+      ON agent_suggestions(from_agent, created_at DESC)
+      WHERE dismissed_at IS NULL AND acted_at IS NULL;
+
     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
       summary,
       raw_text,
@@ -367,28 +410,6 @@ function createSchema(database: Database.Database): void {
   `);
 }
 
-export async function backupDatabase(retentionDays = 7): Promise<string | null> {
-  if (!db) return null;
-  try {
-    const backupDir = path.join(STORE_DIR, 'backups');
-    fs.mkdirSync(backupDir, { recursive: true });
-    fs.chmodSync(backupDir, 0o700);
-    const stamp = new Date().toISOString().slice(0, 10);
-    const backupPath = path.join(backupDir, `claudeclaw.db.${stamp}.bak`);
-    await db.backup(backupPath);
-
-    const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-    for (const f of fs.readdirSync(backupDir)) {
-      if (!f.endsWith('.bak')) continue;
-      const full = path.join(backupDir, f);
-      if (fs.statSync(full).mtimeMs < cutoff) fs.unlinkSync(full);
-    }
-    return backupPath;
-  } catch {
-    return null;
-  }
-}
-
 export function initDatabase(): void {
   fs.mkdirSync(STORE_DIR, { recursive: true });
   const dbPath = path.join(STORE_DIR, 'claudeclaw.db');
@@ -398,6 +419,9 @@ export function initDatabase(): void {
 
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
+  // Wait up to 5s on write locks. Multiple agent processes (main + research +
+  // comms + content + ops) run initDatabase() at startup; without this a
+  // concurrent ALTER can throw SQLITE_BUSY on whichever process loses the race.
   db.pragma('busy_timeout = 5000');
   createSchema(db);
   runMigrations(db);
@@ -410,6 +434,28 @@ export function initDatabase(): void {
     }
     fs.chmodSync(STORE_DIR, 0o700);
   } catch { /* non-fatal on platforms that don't support chmod */ }
+}
+
+/**
+ * Add a column to a table if it doesn't already exist. Tolerates the
+ * concurrent-startup race where two agent processes both observe the column
+ * as missing and both attempt the ALTER; whichever loses sees "duplicate
+ * column" and treats it as a no-op.
+ */
+function addColumnIfMissing(
+  database: Database.Database,
+  table: string,
+  column: string,
+  typeAndDefault: string,
+): void {
+  const cols = database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (cols.some((c) => c.name === column)) return;
+  try {
+    database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${typeAndDefault}`);
+  } catch (err: any) {
+    if (/duplicate column/i.test(err?.message ?? '')) return;
+    throw err;
+  }
 }
 
 /** Add columns that may not exist in older databases. */
@@ -644,13 +690,6 @@ function runMigrations(database: Database.Database): void {
     logger.info('Migration: made mission_tasks.assigned_agent nullable');
   }
 
-  // Mission Control: add timeout_ms column for per-task timeout overrides
-  const missionCols2 = database.prepare(`PRAGMA table_info(mission_tasks)`).all() as Array<{ name: string }>;
-  if (!missionCols2.find((c) => c.name === 'timeout_ms')) {
-    database.exec(`ALTER TABLE mission_tasks ADD COLUMN timeout_ms INTEGER`);
-    logger.info('Migration: added timeout_ms to mission_tasks');
-  }
-
   // Live Meetings: add provider column so we can track which platform
   // each session used (pika avatar vs recall voice-only). Default 'pika'
   // for existing rows so historical data keeps the right label.
@@ -660,76 +699,40 @@ function runMigrations(database: Database.Database): void {
     logger.info('Migration: added provider column to meet_sessions');
   }
 
-  // Per-agent dashboard chat: mission tasks now double as the cross-process
-  // transport for chat. type='async' keeps the existing one-shot behavior;
-  // type='chat' carries chat_id so the executing agent can save its turns
-  // under the correct dashboard chat scope. Re-pragma here so we see the
-  // timeout_ms column added above — conditional ADD COLUMNs only check
-  // for the name they're about to add, so column-order doesn't matter.
-  const missionCols3 = database.prepare(`PRAGMA table_info(mission_tasks)`).all() as Array<{ name: string }>;
-  if (!missionCols3.find((c) => c.name === 'type')) {
-    database.exec(`ALTER TABLE mission_tasks ADD COLUMN type TEXT NOT NULL DEFAULT 'async'`);
-    logger.info('Migration: added mission_tasks.type column');
-  }
-  if (!missionCols3.find((c) => c.name === 'chat_id')) {
-    database.exec(`ALTER TABLE mission_tasks ADD COLUMN chat_id TEXT`);
-    logger.info('Migration: added mission_tasks.chat_id column');
-  }
+  // Text War Room: tag each meeting as voice or text so existing voice rows
+  // stay untouched and the dashboard can filter. The existing `mode` column
+  // on warroom_meetings is voice-only semantics (direct|auto) and can't
+  // double as meeting-type.
+  addColumnIfMissing(database, 'warroom_meetings', 'meeting_type', `TEXT NOT NULL DEFAULT 'voice'`);
 
-  // Per-agent conversation queries need an index that matches their WHERE.
-  database.exec(
-    `CREATE INDEX IF NOT EXISTS idx_convo_log_chat_agent ON conversation_log(chat_id, agent_id, created_at DESC)`,
-  );
+  // Text War Room hive-mind: chat_id on warroom_meetings so a text meeting
+  // knows which Telegram chat owns it, separately from the synthetic
+  // SDK session key (`warroom-text:${meetingId}`). Memory/missions/conv-log
+  // calls inside runAgentTurn use this real chat_id; legacy rows default
+  // to '' and the bridge no-ops for them.
+  addColumnIfMissing(database, 'warroom_meetings', 'chat_id', `TEXT NOT NULL DEFAULT ''`);
 
-  // Inter-agent tasks: created_at + completed_at TEXT → INTEGER (M-2 audit fix).
-  // Aligns with every other timestamp column in the schema (epoch seconds) and
-  // unblocks numeric date-math the dashboard already does on sibling tables.
-  //
-  // Audit #11: gate on `!== 'INTEGER'` instead of `=== 'TEXT'` so any
-  // intermediate type (NULL, NUMERIC, BLOB, missing column) still triggers
-  // the migration to the canonical schema.
-  // Audit #12: row-count guard. Drop+recreate is destructive — refuse to
-  // migrate if the table has rows so we don't silently lose delegation
-  // traffic. If hit, surface a loud error and leave the schema as-is for
-  // manual remediation.
-  const iatCols = database.prepare(`PRAGMA table_info(inter_agent_tasks)`).all() as Array<{ name: string; type: string }>;
-  const iatCreatedAt = iatCols.find((c) => c.name === 'created_at');
-  if (iatCreatedAt && iatCreatedAt.type.toUpperCase() !== 'INTEGER') {
-    const rowCount = (database.prepare(`SELECT COUNT(*) as c FROM inter_agent_tasks`).get() as { c: number }).c;
-    if (rowCount > 0) {
-      logger.error(
-        { rowCount, currentType: iatCreatedAt.type },
-        'Migration M-2 SKIPPED: inter_agent_tasks has rows — refusing destructive DROP. Manual remediation required (export, drop, recreate, reimport).',
-      );
-    } else {
-      database.exec(`
-        DROP TABLE IF EXISTS inter_agent_tasks;
-        CREATE TABLE inter_agent_tasks (
-          id            TEXT PRIMARY KEY,
-          from_agent    TEXT NOT NULL,
-          to_agent      TEXT NOT NULL,
-          chat_id       TEXT NOT NULL,
-          prompt        TEXT NOT NULL,
-          status        TEXT NOT NULL DEFAULT 'pending',
-          result        TEXT,
-          created_at    INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
-          completed_at  INTEGER
-        );
-        CREATE INDEX IF NOT EXISTS idx_inter_agent_tasks_status ON inter_agent_tasks(status, created_at DESC);
-      `);
-      logger.info('Migration: inter_agent_tasks created_at + completed_at → INTEGER (M-2, audit #11+#12)');
-    }
-  }
+  // Text War Room hive-mind: tag conversation_log rows that originated from
+  // the war room so they can be deduped on retry and so memory ingestion
+  // can scope by source if needed. Existing Telegram rows default to
+  // 'telegram'. source_meeting_id + source_turn_id back the partial unique
+  // indexes below, which guard against double-persistence on retries.
+  addColumnIfMissing(database, 'conversation_log', 'source', `TEXT NOT NULL DEFAULT 'telegram'`);
+  addColumnIfMissing(database, 'conversation_log', 'source_meeting_id', `TEXT`);
+  addColumnIfMissing(database, 'conversation_log', 'source_turn_id', `TEXT`);
 
-  // wa_outbox: add last_attempted_at column for race-safe purge (audit #6).
-  // Send loop bumps it before each send attempt; purge gates on it so the
-  // daily sweep can't DELETE a row mid-send (race window) and can still age
-  // out rows that have been abandoned for the full retention window.
-  const waOutboxCols = database.prepare(`PRAGMA table_info(wa_outbox)`).all() as Array<{ name: string }>;
-  if (!waOutboxCols.some((c) => c.name === 'last_attempted_at')) {
-    database.exec(`ALTER TABLE wa_outbox ADD COLUMN last_attempted_at INTEGER`);
-    logger.info('Migration: wa_outbox add last_attempted_at column (audit #6)');
-  }
+  // Two partial unique indexes so a multi-agent slash turn (which produces
+  // ONE user prompt + N assistant rows under one source_turn_id) doesn't
+  // collide on retry. User row keyed without agent_id (singleton per turn);
+  // assistant rows keyed WITH agent_id (one per speaking agent).
+  database.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_convlog_warroom_user
+      ON conversation_log(source, source_meeting_id, source_turn_id)
+      WHERE source != 'telegram' AND role = 'user';
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_convlog_warroom_assistant
+      ON conversation_log(source, source_meeting_id, source_turn_id, agent_id)
+      WHERE source != 'telegram' AND role = 'assistant';
+  `);
 }
 
 /** @internal - for tests only. Creates a fresh in-memory database. */
@@ -738,9 +741,18 @@ export function _initTestDatabase(): void {
   encryptionKey = crypto.randomBytes(32);
   db = new Database(':memory:');
   db.pragma('journal_mode = WAL');
-  db.pragma('busy_timeout = 5000');
   createSchema(db);
   runMigrations(db);
+}
+
+/**
+ * Test-only: backdate a war-room meeting's `ended_at` so retention sweep
+ * tests don't have to wait real wall-clock time. Marked with the `_test`
+ * prefix consistent with other test-only exports.
+ */
+export function _testBackdateMeetingEnd(meetingId: string, endedAtSec: number): void {
+  db.prepare('UPDATE warroom_meetings SET ended_at = ? WHERE id = ?')
+    .run(endedAtSec, meetingId);
 }
 
 export function getSession(chatId: string, agentId = 'main'): string | undefined {
@@ -858,13 +870,15 @@ function extractKeywords(query: string): string[] {
  * Search memories using embedding similarity (primary) with FTS5/LIKE fallback.
  * The queryEmbedding parameter is optional; if provided, vector search is used first.
  * If not provided (or no embeddings in DB), falls back to keyword search.
+ * When `agentId` is supplied, results are strictly scoped to that agent so
+ * one agent never sees another agent's private memories.
  */
 export function searchMemories(
   chatId: string,
   query: string,
   limit = 5,
   queryEmbedding?: number[],
-  agentId = 'main',
+  agentId?: string,
 ): Memory[] {
   // Strategy 1: Vector similarity search (if embedding provided)
   if (queryEmbedding && queryEmbedding.length > 0) {
@@ -879,13 +893,9 @@ export function searchMemories(
       if (scored.length > 0) {
         const ids = scored.map((s) => s.id);
         const placeholders = ids.map(() => '?').join(',');
-        // agent_id is already enforced upstream by getMemoriesWithEmbeddings,
-        // but repeat it here so this query is correct on its own.
         const rows = db
-          .prepare(
-            `SELECT * FROM memories WHERE id IN (${placeholders}) AND agent_id = ? AND superseded_by IS NULL`,
-          )
-          .all(...ids, agentId) as Memory[];
+          .prepare(`SELECT * FROM memories WHERE id IN (${placeholders}) AND superseded_by IS NULL`)
+          .all(...ids) as Memory[];
         // Preserve similarity-score ordering (SQL IN doesn't guarantee order)
         const rowMap = new Map(rows.map((r) => [r.id, r]));
         return ids.map((id) => rowMap.get(id)).filter(Boolean) as Memory[];
@@ -903,15 +913,19 @@ export function searchMemories(
   // the worst case, interpret attacker-controlled characters as query
   // operators. Belt-and-braces on top of extractKeywords' own filtering.
   const ftsQuery = keywords.map((w) => `"${w.replace(/"/g, '')}"*`).join(' OR ');
+  const ftsAgentClause = agentId ? ' AND memories.agent_id = ?' : '';
+  const ftsParams: unknown[] = [ftsQuery, chatId];
+  if (agentId) ftsParams.push(agentId);
+  ftsParams.push(limit);
   let results = db
     .prepare(
       `SELECT memories.* FROM memories
        JOIN memories_fts ON memories.id = memories_fts.rowid
-       WHERE memories_fts MATCH ? AND memories.chat_id = ? AND memories.agent_id = ? AND memories.superseded_by IS NULL
+       WHERE memories_fts MATCH ? AND memories.chat_id = ? AND memories.superseded_by IS NULL${ftsAgentClause}
        ORDER BY rank
        LIMIT ?`,
     )
-    .all(ftsQuery, chatId, agentId, limit) as Memory[];
+    .all(...ftsParams) as Memory[];
 
   if (results.length > 0) return results;
 
@@ -925,14 +939,18 @@ export function searchMemories(
     likeParams.push(pattern, pattern, pattern, pattern);
   }
 
+  const likeAgentClause = agentId ? ' AND agent_id = ?' : '';
+  const likeAllParams: unknown[] = [chatId, ...likeParams];
+  if (agentId) likeAllParams.push(agentId);
+  likeAllParams.push(limit);
   results = db
     .prepare(
       `SELECT * FROM memories
-       WHERE chat_id = ? AND agent_id = ? AND superseded_by IS NULL AND (${likeConditions})
+       WHERE chat_id = ? AND superseded_by IS NULL AND (${likeConditions})${likeAgentClause}
        ORDER BY importance DESC, accessed_at DESC
        LIMIT ?`,
     )
-    .all(chatId, agentId, ...likeParams, limit) as Memory[];
+    .all(...likeAllParams) as Memory[];
 
   return results;
 }
@@ -968,13 +986,15 @@ export function saveStructuredMemoryAtomic(
 
 export function getMemoriesWithEmbeddings(
   chatId: string,
-  agentId = 'main',
+  agentId?: string,
 ): Array<{ id: number; embedding: number[]; summary: string; importance: number }> {
+  const sql = agentId
+    ? 'SELECT id, embedding, summary, importance FROM memories WHERE chat_id = ? AND agent_id = ? AND embedding IS NOT NULL AND superseded_by IS NULL'
+    : 'SELECT id, embedding, summary, importance FROM memories WHERE chat_id = ? AND embedding IS NOT NULL AND superseded_by IS NULL';
+  const params = agentId ? [chatId, agentId] : [chatId];
   const rows = db
-    .prepare(
-      'SELECT id, embedding, summary, importance FROM memories WHERE chat_id = ? AND agent_id = ? AND embedding IS NOT NULL AND superseded_by IS NULL',
-    )
-    .all(chatId, agentId) as Array<{ id: number; embedding: string; summary: string; importance: number }>;
+    .prepare(sql)
+    .all(...params) as Array<{ id: number; embedding: string; summary: string; importance: number }>;
   return rows.map((r) => ({
     id: r.id,
     embedding: JSON.parse(r.embedding) as number[],
@@ -986,22 +1006,30 @@ export function getMemoriesWithEmbeddings(
 export function getRecentHighImportanceMemories(
   chatId: string,
   limit = 5,
-  agentId = 'main',
+  agentId?: string,
 ): Memory[] {
+  if (agentId) {
+    return db
+      .prepare(
+        `SELECT * FROM memories WHERE chat_id = ? AND agent_id = ? AND importance >= 0.5
+         ORDER BY accessed_at DESC LIMIT ?`,
+      )
+      .all(chatId, agentId, limit) as Memory[];
+  }
   return db
     .prepare(
-      `SELECT * FROM memories WHERE chat_id = ? AND agent_id = ? AND importance >= 0.5
+      `SELECT * FROM memories WHERE chat_id = ? AND importance >= 0.5
        ORDER BY accessed_at DESC LIMIT ?`,
     )
-    .all(chatId, agentId, limit) as Memory[];
+    .all(chatId, limit) as Memory[];
 }
 
-export function getRecentMemories(chatId: string, limit = 5, agentId = 'main'): Memory[] {
+export function getRecentMemories(chatId: string, limit = 5): Memory[] {
   return db
     .prepare(
-      'SELECT * FROM memories WHERE chat_id = ? AND agent_id = ? ORDER BY accessed_at DESC LIMIT ?',
+      'SELECT * FROM memories WHERE chat_id = ? ORDER BY accessed_at DESC LIMIT ?',
     )
-    .all(chatId, agentId, limit) as Memory[];
+    .all(chatId, limit) as Memory[];
 }
 
 export function touchMemory(id: number): void {
@@ -1283,6 +1311,26 @@ export function deleteScheduledTask(id: string): void {
   db.prepare('DELETE FROM scheduled_tasks WHERE id = ?').run(id);
 }
 
+/**
+ * Patch the editable fields of a scheduled task. Caller is responsible
+ * for recomputing next_run when schedule changes. Pass `undefined` to
+ * skip a field; pass a value to update it.
+ */
+export function updateScheduledTask(
+  id: string,
+  patch: { prompt?: string; schedule?: string; nextRun?: number; agentId?: string },
+): void {
+  const sets: string[] = [];
+  const vals: any[] = [];
+  if (patch.prompt !== undefined) { sets.push('prompt = ?'); vals.push(patch.prompt); }
+  if (patch.schedule !== undefined) { sets.push('schedule = ?'); vals.push(patch.schedule); }
+  if (patch.nextRun !== undefined) { sets.push('next_run = ?'); vals.push(patch.nextRun); }
+  if (patch.agentId !== undefined) { sets.push('agent_id = ?'); vals.push(patch.agentId); }
+  if (sets.length === 0) return;
+  vals.push(id);
+  db.prepare(`UPDATE scheduled_tasks SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+}
+
 export function pauseScheduledTask(id: string): void {
   db.prepare(`UPDATE scheduled_tasks SET status = 'paused' WHERE id = ?`).run(id);
 }
@@ -1370,81 +1418,30 @@ export function markWaMessageSent(id: number): void {
   db.prepare(`UPDATE wa_outbox SET sent_at = ? WHERE id = ?`).run(now, id);
 }
 
-/**
- * Bump last_attempted_at on a wa_outbox row. Called by the send loop before
- * each send attempt so the purge sweep can distinguish actively-retried rows
- * from abandoned ones (audit #6 race fix).
- */
-export function markWaMessageAttempted(id: number): void {
-  const now = Math.floor(Date.now() / 1000);
-  db.prepare(`UPDATE wa_outbox SET last_attempted_at = ? WHERE id = ?`).run(now, id);
-}
-
-// ── system_state kv (audit #17) ──────────────────────────────────────
-
-export function getSystemValue(key: string): string | undefined {
-  const row = db.prepare('SELECT value FROM system_state WHERE key = ?').get(key) as { value: string } | undefined;
-  return row?.value;
-}
-
-export function setSystemValue(key: string, value: string): void {
-  db.prepare(
-    `INSERT INTO system_state (key, value) VALUES (?, ?)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-  ).run(key, value);
-}
-
 // ── WhatsApp messages ────────────────────────────────────────────────
 
 /**
- * Prune WhatsApp messages older than the retention windows.
- * - `retentionDays` (default 3): wa_messages, sent wa_outbox rows, wa_message_map
- * - `unsentRetentionDays` (default 30): unsent wa_outbox rows (M-3 audit fix)
- *
- * Without the unsent window, persistent send failures left rows in
- * wa_outbox forever, growing the queue and the unsent index unbounded.
+ * Prune WhatsApp messages older than the given number of days.
+ * Covers wa_messages, wa_outbox (sent only), and wa_message_map.
  */
-export function pruneWaMessages(
-  retentionDays = 3,
-  unsentRetentionDays = 30,
-): { messages: number; outbox: number; outboxUnsent: number; map: number } {
-  const now = Math.floor(Date.now() / 1000);
-  const cutoffSent = now - retentionDays * 86400;
-  const cutoffUnsent = now - unsentRetentionDays * 86400;
+export function pruneWaMessages(retentionDays = 3): { messages: number; outbox: number; map: number } {
+  const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400;
 
   const msgResult = db.prepare(
     'DELETE FROM wa_messages WHERE created_at < ?',
-  ).run(cutoffSent);
+  ).run(cutoff);
 
   const outboxResult = db.prepare(
     'DELETE FROM wa_outbox WHERE sent_at IS NOT NULL AND created_at < ?',
-  ).run(cutoffSent);
-
-  // M-3 + audit #6: age out unsent rows that have been queued past the long
-  // window. Failed deliveries left in the queue indefinitely cause unbounded
-  // growth of the table and the partial idx_wa_outbox_unsent index.
-  // Audit #6 fixes:
-  //   - created_at > 0 guard skips legacy / null-coalesced rows that would
-  //     otherwise always satisfy `< cutoff` and get nuked on first sweep
-  //   - last_attempted_at gate closes the race window where the send loop
-  //     reads a row, the sweep deletes it before the UPDATE sent_at, and the
-  //     message silently disappears
-  const outboxUnsentResult = db.prepare(
-    `DELETE FROM wa_outbox
-     WHERE sent_at IS NULL
-       AND created_at > 0
-       AND created_at < ?
-       AND (last_attempted_at IS NULL OR last_attempted_at < ?)`,
-  ).run(cutoffUnsent, cutoffUnsent);
+  ).run(cutoff);
 
   const mapResult = db.prepare(
     'DELETE FROM wa_message_map WHERE created_at < ?',
-  ).run(cutoffSent);
+  ).run(cutoff);
 
   return {
     messages: msgResult.changes,
     outbox: outboxResult.changes,
-    outboxUnsent: outboxUnsentResult.changes,
     map: mapResult.changes,
   };
 }
@@ -1499,14 +1496,14 @@ export function getRecentConversation(
       .prepare(
         `SELECT * FROM conversation_log
          WHERE chat_id = ? AND agent_id = ?
-         ORDER BY created_at DESC, id DESC LIMIT ?`,
+         ORDER BY created_at DESC LIMIT ?`,
       )
       .all(chatId, agentId, limit) as ConversationTurn[];
   }
   return db
     .prepare(
       `SELECT * FROM conversation_log WHERE chat_id = ?
-       ORDER BY created_at DESC, id DESC LIMIT ?`,
+       ORDER BY created_at DESC LIMIT ?`,
     )
     .all(chatId, limit) as ConversationTurn[];
 }
@@ -1558,17 +1555,7 @@ export function getConversationPage(
   chatId: string,
   limit = 40,
   beforeId?: number,
-  agentId?: string,
 ): ConversationTurn[] {
-  if (beforeId && agentId) {
-    return db
-      .prepare(
-        `SELECT * FROM conversation_log
-         WHERE chat_id = ? AND agent_id = ? AND id < ?
-         ORDER BY id DESC LIMIT ?`,
-      )
-      .all(chatId, agentId, beforeId, limit) as ConversationTurn[];
-  }
   if (beforeId) {
     return db
       .prepare(
@@ -1577,15 +1564,6 @@ export function getConversationPage(
          ORDER BY id DESC LIMIT ?`,
       )
       .all(chatId, beforeId, limit) as ConversationTurn[];
-  }
-  if (agentId) {
-    return db
-      .prepare(
-        `SELECT * FROM conversation_log
-         WHERE chat_id = ? AND agent_id = ?
-         ORDER BY id DESC LIMIT ?`,
-      )
-      .all(chatId, agentId, limit) as ConversationTurn[];
   }
   return db
     .prepare(
@@ -1625,6 +1603,45 @@ export function pruneConversationLog(keepPerChat = 500): void {
     }
   });
   runAll(pairs);
+}
+
+/**
+ * Retention sweep for ended war-room meetings + their transcripts.
+ *
+ * Why this exists: warroom_meetings + warroom_transcript were not touched
+ * by the original decay sweep. Long-running installs accumulate every
+ * meeting indefinitely; transcripts can be hundreds of rows each. Cap at
+ * `retentionDays` since `ended_at` (default 90). Active meetings (no
+ * `ended_at`) are never pruned.
+ *
+ * Cascading: deleting a `warroom_meetings` row removes its
+ * `warroom_transcript` rows via the FK ON DELETE CASCADE. We also clear
+ * matching `conversation_log` rows tagged with the meeting's ID so the
+ * "delete a meeting actually deletes its content" promise holds.
+ */
+export function pruneWarRoomMeetings(retentionDays = 90): { meetings: number; convLog: number } {
+  const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400;
+  return db.transaction(() => {
+    const expired = db
+      .prepare(`SELECT id FROM warroom_meetings WHERE ended_at IS NOT NULL AND ended_at < ?`)
+      .all(cutoff) as Array<{ id: string }>;
+    if (expired.length === 0) return { meetings: 0, convLog: 0 };
+    const ids = expired.map((r) => r.id);
+    const placeholders = ids.map(() => '?').join(',');
+
+    const convDel = db
+      .prepare(`DELETE FROM conversation_log WHERE source_meeting_id IN (${placeholders})`)
+      .run(...ids);
+    // warroom_transcript rows go via the FK cascade on warroom_meetings.
+    const meetDel = db
+      .prepare(`DELETE FROM warroom_meetings WHERE id IN (${placeholders})`)
+      .run(...ids);
+
+    return {
+      meetings: Number(meetDel.changes),
+      convLog: Number(convDel.changes),
+    };
+  })();
 }
 
 // ── WhatsApp messages ────────────────────────────────────────────────
@@ -2019,7 +2036,7 @@ export function getAgentRecentConversation(agentId: string, chatId: string, limi
   return db
     .prepare(
       `SELECT * FROM conversation_log WHERE agent_id = ? AND chat_id = ?
-       ORDER BY created_at DESC, id DESC LIMIT ?`,
+       ORDER BY created_at DESC LIMIT ?`,
     )
     .all(agentId, chatId, limit) as ConversationTurn[];
 }
@@ -2082,8 +2099,8 @@ export interface InterAgentTask {
   prompt: string;
   status: string;
   result: string | null;
-  created_at: number;
-  completed_at: number | null;
+  created_at: string;
+  completed_at: string | null;
 }
 
 export function createInterAgentTask(
@@ -2095,7 +2112,7 @@ export function createInterAgentTask(
 ): void {
   db.prepare(
     `INSERT INTO inter_agent_tasks (id, from_agent, to_agent, chat_id, prompt, status, created_at)
-     VALUES (?, ?, ?, ?, ?, 'pending', CAST(strftime('%s','now') AS INTEGER))`,
+     VALUES (?, ?, ?, ?, ?, 'pending', datetime('now'))`,
   ).run(id, fromAgent, toAgent, chatId, prompt);
 }
 
@@ -2105,7 +2122,7 @@ export function completeInterAgentTask(
   result: string | null,
 ): void {
   db.prepare(
-    `UPDATE inter_agent_tasks SET status = ?, result = ?, completed_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?`,
+    `UPDATE inter_agent_tasks SET status = ?, result = ?, completed_at = datetime('now') WHERE id = ?`,
   ).run(status, result?.slice(0, 2000) ?? null, id);
 }
 
@@ -2139,9 +2156,6 @@ export interface MissionTask {
   error: string | null;
   created_by: string;
   priority: number;
-  timeout_ms: number | null;
-  type: string;
-  chat_id: string | null;
   created_at: number;
   started_at: number | null;
   completed_at: number | null;
@@ -2154,47 +2168,24 @@ export function createMissionTask(
   assignedAgent: string | null = null,
   createdBy = 'dashboard',
   priority = 0,
-  timeoutMs: number | null = null,
-  type: 'async' | 'chat' = 'async',
-  chatId: string | null = null,
 ): void {
   const now = Math.floor(Date.now() / 1000);
   db.prepare(
-    `INSERT INTO mission_tasks (id, title, prompt, assigned_agent, status, created_by, priority, timeout_ms, type, chat_id, created_at)
-     VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)`,
-  ).run(id, title, prompt, assignedAgent, createdBy, priority, timeoutMs, type, chatId, now);
-}
-
-export function updateMissionTaskTimeout(id: string, timeoutMs: number): boolean {
-  // Only mutate non-terminal rows. A PATCH racing against a just-completed
-  // task must not silently rewrite the timeout after the run has ended.
-  const result = db.prepare(
-    `UPDATE mission_tasks SET timeout_ms = ?
-       WHERE id = ? AND status IN ('queued', 'running')`,
-  ).run(timeoutMs, id);
-  return result.changes > 0;
+    `INSERT INTO mission_tasks (id, title, prompt, assigned_agent, status, created_by, priority, created_at)
+     VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)`,
+  ).run(id, title, prompt, assignedAgent, createdBy, priority, now);
 }
 
 export function getUnassignedMissionTasks(): MissionTask[] {
   return db
     .prepare(
-      `SELECT * FROM mission_tasks
-       WHERE assigned_agent IS NULL AND status = 'queued' AND type = 'async'
+      `SELECT * FROM mission_tasks WHERE assigned_agent IS NULL AND status = 'queued'
        ORDER BY priority DESC, created_at ASC`,
     )
     .all() as MissionTask[];
 }
 
-/**
- * List mission tasks for the Mission Control UI. Chat-type tasks are the
- * transport for dashboard per-agent chat and are excluded by default so
- * they don't pollute the task list. Pass `includeChat: true` for debug.
- */
-export function getMissionTasks(
-  agentId?: string,
-  status?: string,
-  includeChat = false,
-): MissionTask[] {
+export function getMissionTasks(agentId?: string, status?: string): MissionTask[] {
   const conditions: string[] = [];
   const params: unknown[] = [];
 
@@ -2205,9 +2196,6 @@ export function getMissionTasks(
   if (status) {
     conditions.push('status = ?');
     params.push(status);
-  }
-  if (!includeChat) {
-    conditions.push("type = 'async'");
   }
 
   const where = conditions.length > 0 ? ' WHERE ' + conditions.join(' AND ') : '';
@@ -2293,17 +2281,11 @@ export function assignMissionTask(id: string, agent: string): boolean {
 }
 
 export function getMissionTaskHistory(limit = 30, offset = 0): { tasks: MissionTask[]; total: number } {
-  // Exclude chat-type tasks — they're dashboard-scoped chat turns, not
-  // Mission Control work items. Showing them would pollute the history view.
   const total = (db.prepare(
-    `SELECT COUNT(*) as c FROM mission_tasks
-       WHERE status IN ('completed', 'failed', 'cancelled')
-         AND (type IS NULL OR type = 'async')`,
+    `SELECT COUNT(*) as c FROM mission_tasks WHERE status IN ('completed', 'failed', 'cancelled')`,
   ).get() as { c: number }).c;
   const tasks = db.prepare(
-    `SELECT * FROM mission_tasks
-       WHERE status IN ('completed', 'failed', 'cancelled')
-         AND (type IS NULL OR type = 'async')
+    `SELECT * FROM mission_tasks WHERE status IN ('completed', 'failed', 'cancelled')
      ORDER BY completed_at DESC LIMIT ? OFFSET ?`,
   ).all(limit, offset) as MissionTask[];
   return { tasks, total };
@@ -2616,33 +2598,445 @@ export function createWarRoomMeeting(id: string, mode: string, pinnedAgent: stri
 export function endWarRoomMeeting(id: string, entryCount: number): void {
   const now = Math.floor(Date.now() / 1000);
   db.prepare(
-    'UPDATE warroom_meetings SET ended_at = ?, duration_s = ended_at - started_at, entry_count = ? WHERE id = ?',
-  ).run(now, entryCount, id);
-  // Actually compute duration correctly
-  db.prepare(
-    'UPDATE warroom_meetings SET duration_s = ? - started_at WHERE id = ?',
-  ).run(now, id);
+    'UPDATE warroom_meetings SET ended_at = ?, duration_s = ? - started_at, entry_count = ? WHERE id = ?',
+  ).run(now, now, entryCount, id);
 }
 
-export function addWarRoomTranscript(meetingId: string, speaker: string, text: string): void {
-  db.prepare(
+export function addWarRoomTranscript(
+  meetingId: string,
+  speaker: string,
+  text: string,
+): { id: number; created_at: number } {
+  const created_at = Math.floor(Date.now() / 1000);
+  const info = db.prepare(
     'INSERT INTO warroom_transcript (meeting_id, speaker, text, created_at) VALUES (?, ?, ?, ?)',
-  ).run(meetingId, speaker, text, Math.floor(Date.now() / 1000));
+  ).run(meetingId, speaker, text, created_at);
+  return { id: Number(info.lastInsertRowid), created_at };
 }
 
+// Voice-only history. Text meetings live in the same table (with
+// meeting_type = 'text') and have their own /warroom/text picker — they
+// must not leak into the voice meeting list.
 export function getWarRoomMeetings(limit = 20): Array<{
   id: string; started_at: number; ended_at: number | null; duration_s: number | null;
   mode: string; pinned_agent: string; entry_count: number;
 }> {
   return db.prepare(
-    'SELECT * FROM warroom_meetings ORDER BY started_at DESC LIMIT ?',
+    `SELECT * FROM warroom_meetings
+      WHERE meeting_type IS NULL OR meeting_type = 'voice'
+      ORDER BY started_at DESC LIMIT ?`,
   ).all(limit) as any[];
 }
 
-export function getWarRoomTranscript(meetingId: string): Array<{
-  speaker: string; text: string; created_at: number;
+export function getWarRoomTranscript(
+  meetingId: string,
+  opts: { limit?: number; beforeTs?: number; beforeId?: number } = {},
+): Array<{
+  id: number; speaker: string; text: string; created_at: number;
 }> {
+  const { limit, beforeTs, beforeId } = opts;
+  // When limit is omitted, preserve the legacy "return everything ASC"
+  // behavior for the voice War Room caller in dashboard.ts.
+  if (limit === undefined && beforeTs === undefined && beforeId === undefined) {
+    return db.prepare(
+      'SELECT id, speaker, text, created_at FROM warroom_transcript WHERE meeting_id = ? ORDER BY created_at, id',
+    ).all(meetingId) as any[];
+  }
+  // Paginated path: composite cursor on (created_at, id) so multiple rows
+  // with the same created_at second don't get skipped. Callers pass
+  // beforeTs+beforeId (the oldest already-loaded row's values); we return
+  // rows strictly older than that cursor, newest-first, and the caller
+  // reverses for display order.
+  const cap = Math.max(1, Math.min(1000, limit ?? 200));
+  if (beforeTs !== undefined) {
+    const bId = beforeId ?? Number.MAX_SAFE_INTEGER;
+    return db.prepare(
+      `SELECT id, speaker, text, created_at
+         FROM warroom_transcript
+        WHERE meeting_id = ?
+          AND (created_at < ? OR (created_at = ? AND id < ?))
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?`,
+    ).all(meetingId, beforeTs, beforeTs, bId, cap) as any[];
+  }
   return db.prepare(
-    'SELECT speaker, text, created_at FROM warroom_transcript WHERE meeting_id = ? ORDER BY created_at',
-  ).all(meetingId) as any[];
+    'SELECT id, speaker, text, created_at FROM warroom_transcript WHERE meeting_id = ? ORDER BY created_at DESC, id DESC LIMIT ?',
+  ).all(meetingId, cap) as any[];
+}
+
+// ── War Room hive-mind bridges ───────────────────────────────────────
+
+/** Persist a war-room turn to conversation_log atomically and idempotently.
+ *  - User row written ONCE per turn (singleton via partial unique index).
+ *  - One assistant row per agent (per-agent unique via index).
+ *  - On retry, INSERT OR IGNORE detects existing rows; only fresh inserts
+ *    are reported back, so the caller can gate memory ingestion on the
+ *    assistant row being NEW (not a no-op replay).
+ *  - chatId === '' (legacy meetings) → caller should skip this entirely.
+ */
+export function saveWarRoomConversationTurn(args: {
+  chatId: string;
+  agentId: string;
+  originalUserText: string;
+  agentReply: string;
+  meetingId: string;
+  turnId: string;
+}): { userInserted: boolean; assistantInserted: boolean } {
+  const { chatId, agentId, originalUserText, agentReply, meetingId, turnId } = args;
+  if (!meetingId || !turnId) {
+    throw new Error('saveWarRoomConversationTurn: meetingId and turnId required');
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const userStmt = db.prepare(
+    `INSERT OR IGNORE INTO conversation_log
+       (chat_id, session_id, role, content, created_at, agent_id, source, source_meeting_id, source_turn_id)
+     VALUES (?, NULL, 'user', ?, ?, ?, 'warroom-text', ?, ?)`,
+  );
+  const asstStmt = db.prepare(
+    `INSERT OR IGNORE INTO conversation_log
+       (chat_id, session_id, role, content, created_at, agent_id, source, source_meeting_id, source_turn_id)
+     VALUES (?, NULL, 'assistant', ?, ?, ?, 'warroom-text', ?, ?)`,
+  );
+  const txn = db.transaction(() => {
+    const u = userStmt.run(chatId, originalUserText, now, agentId, meetingId, turnId);
+    const a = asstStmt.run(chatId, agentReply, now, agentId, meetingId, turnId);
+    return {
+      userInserted: u.changes > 0,
+      assistantInserted: a.changes > 0,
+    };
+  });
+  return txn();
+}
+
+/** Bounded mission lookup. Existing getMissionTasks is unbounded; this
+ *  variant takes a sinceTs cutoff and a hard limit so /standup never
+ *  pulls a runaway result set. */
+export function getRecentMissionTasks(
+  agentId: string,
+  status: string | undefined,
+  sinceTs: number,
+  limit = 10,
+): MissionTask[] {
+  const conds: string[] = ['assigned_agent = ?', 'created_at >= ?'];
+  const params: unknown[] = [agentId, sinceTs];
+  if (status) { conds.push('status = ?'); params.push(status); }
+  params.push(limit);
+  return db
+    .prepare(
+      `SELECT * FROM mission_tasks WHERE ${conds.join(' AND ')}
+       ORDER BY created_at DESC LIMIT ?`,
+    )
+    .all(...params) as MissionTask[];
+}
+
+/** Last N war-room transcript rows for a chat across all its meetings,
+ *  optionally excluding the meeting that's currently building context.
+ *  Used by buildMemoryContext to bridge war room → Telegram so a Telegram
+ *  follow-up can cite what was said earlier in a war room. */
+export function getRecentWarRoomTranscriptForChat(
+  chatId: string,
+  opts: { limit?: number; sinceTs?: number; excludeMeetingId?: string } = {},
+): Array<{ id: number; meeting_id: string; speaker: string; text: string; created_at: number }> {
+  const { limit = 10, sinceTs, excludeMeetingId } = opts;
+  const conds: string[] = ['m.meeting_type = ?', 'm.chat_id = ?'];
+  const params: unknown[] = ['text', chatId];
+  if (sinceTs !== undefined) { conds.push('t.created_at >= ?'); params.push(sinceTs); }
+  if (excludeMeetingId) { conds.push('t.meeting_id != ?'); params.push(excludeMeetingId); }
+  params.push(limit);
+  return db
+    .prepare(
+      `SELECT t.id, t.meeting_id, t.speaker, t.text, t.created_at
+         FROM warroom_transcript t
+         JOIN warroom_meetings m ON m.id = t.meeting_id
+        WHERE ${conds.join(' AND ')}
+        ORDER BY t.created_at DESC, t.id DESC
+        LIMIT ?`,
+    )
+    .all(...params) as Array<{ id: number; meeting_id: string; speaker: string; text: string; created_at: number }>;
+}
+
+// ── Text War Room helpers ────────────────────────────────────────────
+// Kept separate from createWarRoomMeeting so the text path can't accidentally
+// inherit the voice default of pinned_agent='main'. A text meeting starts
+// with NO pinned agent so the router is allowed to pick primary.
+
+export function createTextMeeting(id: string, chatId = ''): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO warroom_meetings
+       (id, started_at, mode, pinned_agent, meeting_type, chat_id)
+     VALUES (?, ?, 'direct', NULL, 'text', ?)`,
+  ).run(id, Math.floor(Date.now() / 1000), chatId);
+}
+
+export function getTextMeeting(id: string): {
+  id: string; started_at: number; ended_at: number | null; duration_s: number | null;
+  mode: string; pinned_agent: string | null; entry_count: number; meeting_type: string;
+  chat_id: string;
+} | null {
+  const row = db.prepare(
+    `SELECT id, started_at, ended_at, duration_s, mode, pinned_agent, entry_count, meeting_type, chat_id
+       FROM warroom_meetings WHERE id = ? AND meeting_type = 'text'`,
+  ).get(id) as any;
+  return row ?? null;
+}
+
+export function setMeetingPin(meetingId: string, agentId: string | null): void {
+  db.prepare(
+    `UPDATE warroom_meetings SET pinned_agent = ? WHERE id = ? AND meeting_type = 'text'`,
+  ).run(agentId, meetingId);
+}
+
+/** Returns ids of every still-open text meeting except the optional
+ *  exclusion. Optionally scope by chat_id so creating a new meeting in
+ *  chat A does not auto-end open meetings belonging to chat B. The
+ *  dashboard uses this to force-end stale meetings when the user creates
+ *  a new one (refresh = clean slate within the same chat). */
+export function getOpenTextMeetingIds(exceptId?: string, chatId?: string): string[] {
+  const conds: string[] = [`meeting_type = 'text'`, `ended_at IS NULL`];
+  const params: unknown[] = [];
+  if (exceptId) { conds.push('id != ?'); params.push(exceptId); }
+  if (chatId !== undefined) { conds.push('chat_id = ?'); params.push(chatId); }
+  const rows = db.prepare(
+    `SELECT id FROM warroom_meetings WHERE ${conds.join(' AND ')}`,
+  ).all(...params) as Array<{ id: string }>;
+  return rows.map((r) => r.id);
+}
+
+/** Recent text meetings, newest first. Includes a short preview of the
+ *  first user message so the picker can show a recognizable label.
+ *  Optionally scope by chat_id so the picker only shows meetings for the
+ *  current chat. Pass chatId='' to see legacy/unscoped meetings; omit
+ *  to include everything (admin/debug). */
+export function getTextMeetings(limit = 20, chatId?: string): Array<{
+  id: string;
+  started_at: number;
+  ended_at: number | null;
+  entry_count: number;
+  preview: string;
+}> {
+  const params: unknown[] = [];
+  let where = `meeting_type = 'text'`;
+  if (chatId !== undefined) { where += ` AND chat_id = ?`; params.push(chatId); }
+  params.push(limit);
+  const rows = db.prepare(
+    `SELECT id, started_at, ended_at, entry_count
+       FROM warroom_meetings
+      WHERE ${where}
+      ORDER BY started_at DESC
+      LIMIT ?`,
+  ).all(...params) as Array<{ id: string; started_at: number; ended_at: number | null; entry_count: number }>;
+  if (rows.length === 0) return [];
+  const previewStmt = db.prepare(
+    `SELECT text FROM warroom_transcript
+      WHERE meeting_id = ? AND speaker = 'user'
+      ORDER BY created_at, id LIMIT 1`,
+  );
+  return rows.map((r) => {
+    const p = previewStmt.get(r.id) as { text: string } | undefined;
+    const preview = (p?.text ?? '').slice(0, 140);
+    return { ...r, preview };
+  });
+}
+
+export function clearMeetingSessions(meetingId: string, agentIds: string[]): number {
+  if (agentIds.length === 0) return 0;
+  const chatId = `warroom-text:${meetingId}`;
+  const placeholders = agentIds.map(() => '?').join(',');
+  const info = db.prepare(
+    `DELETE FROM sessions WHERE chat_id = ? AND agent_id IN (${placeholders})`,
+  ).run(chatId, ...agentIds);
+  return info.changes;
+}
+
+// ── Client message dedup (in-memory LRU) ─────────────────────────────
+// Sized for 10k concurrent conversations with rapid resends. 24h TTL means
+// a user that retries a message a day later gets re-processed (acceptable).
+// Not persisted across bot restarts — worst case a retry after restart
+// double-processes; acceptable tradeoff vs a DB table for something this
+// ephemeral.
+
+const CLIENT_MSG_TTL_MS = 24 * 60 * 60 * 1000;
+const CLIENT_MSG_MAX_ENTRIES = 10_000;
+const _clientMsgSeen = new Map<string, number>(); // id -> expires_at
+
+export function rememberClientMsgId(id: string, ttlMs = CLIENT_MSG_TTL_MS): boolean {
+  const now = Date.now();
+  // Reject anything that isn't a v4 UUID. Malformed IDs would otherwise
+  // cache unbounded and become a DoS vector.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    return false;
+  }
+  const existing = _clientMsgSeen.get(id);
+  if (existing !== undefined && existing > now) return false; // duplicate
+  _clientMsgSeen.set(id, now + ttlMs);
+  // Opportunistic eviction: evict expired entries whenever we cross the cap.
+  if (_clientMsgSeen.size > CLIENT_MSG_MAX_ENTRIES) {
+    for (const [k, exp] of _clientMsgSeen) {
+      if (exp <= now) _clientMsgSeen.delete(k);
+      if (_clientMsgSeen.size <= CLIENT_MSG_MAX_ENTRIES) break;
+    }
+    // If still over cap after evicting expired entries, drop oldest-inserted
+    // (Map iteration order is insertion order in ES2015+).
+    while (_clientMsgSeen.size > CLIENT_MSG_MAX_ENTRIES) {
+      const oldest = _clientMsgSeen.keys().next().value;
+      if (oldest === undefined) break;
+      _clientMsgSeen.delete(oldest);
+    }
+  }
+  return true;
+}
+
+/** @internal for tests — clear the dedup cache. */
+export function _resetClientMsgCache(): void {
+  _clientMsgSeen.clear();
+}
+
+// ── Dashboard settings (personalization KV) ─────────────────────────
+
+export function getDashboardSetting(key: string): string | null {
+  const row = db.prepare(`SELECT value FROM dashboard_settings WHERE key = ?`).get(key) as { value: string } | undefined;
+  return row ? row.value : null;
+}
+
+export function setDashboardSetting(key: string, value: string): void {
+  db.prepare(
+    `INSERT INTO dashboard_settings (key, value, updated_at) VALUES (?, ?, strftime('%s','now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  ).run(key, value);
+}
+
+export function getAllDashboardSettings(): Record<string, string> {
+  const rows = db.prepare(`SELECT key, value FROM dashboard_settings`).all() as { key: string; value: string }[];
+  const out: Record<string, string> = {};
+  for (const row of rows) out[row.key] = row.value;
+  return out;
+}
+
+// ── Agent file history (versioned backups in SQLite) ────────────────
+
+export type AgentFileKind = 'claudemd' | 'agent-yaml';
+
+export interface AgentFileHistoryRow {
+  id: number;
+  agent_id: string;
+  file_kind: AgentFileKind;
+  content: string;
+  byte_size: number;
+  sha256: string;
+  author: string;
+  created_at: number;
+}
+
+export function appendAgentFileHistory(
+  agentId: string,
+  fileKind: AgentFileKind,
+  content: string,
+  sha256: string,
+  author = 'dashboard',
+): number {
+  const result = db.prepare(
+    `INSERT INTO agent_file_history (agent_id, file_kind, content, byte_size, sha256, author)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(agentId, fileKind, content, Buffer.byteLength(content, 'utf8'), sha256, author);
+  return Number(result.lastInsertRowid);
+}
+
+/** List versions newest-first. Excludes content by default to keep the
+ *  payload small; callers fetch full content via getAgentFileHistory(id). */
+export function listAgentFileHistory(
+  agentId: string,
+  fileKind: AgentFileKind,
+  limit = 50,
+): Array<Omit<AgentFileHistoryRow, 'content'>> {
+  return db.prepare(
+    `SELECT id, agent_id, file_kind, byte_size, sha256, author, created_at
+     FROM agent_file_history
+     WHERE agent_id = ? AND file_kind = ?
+     ORDER BY created_at DESC, id DESC
+     LIMIT ?`,
+  ).all(agentId, fileKind, limit) as Array<Omit<AgentFileHistoryRow, 'content'>>;
+}
+
+export function getAgentFileHistory(id: number): AgentFileHistoryRow | null {
+  const row = db.prepare(
+    `SELECT * FROM agent_file_history WHERE id = ?`,
+  ).get(id) as AgentFileHistoryRow | undefined;
+  return row ?? null;
+}
+
+// ── Agent suggestions ──────────────────────────────────────────────
+
+export interface AgentSuggestion {
+  id: number;
+  from_agent: string;
+  suggested_id: string;
+  suggested_name: string;
+  suggested_description: string;
+  reasoning: string;
+  activity_share_pct: number | null;
+  created_at: number;
+  dismissed_at: number | null;
+  acted_at: number | null;
+}
+
+export function insertAgentSuggestion(s: Omit<AgentSuggestion, 'id' | 'created_at' | 'dismissed_at' | 'acted_at'>): number {
+  const r = db.prepare(
+    `INSERT INTO agent_suggestions
+       (from_agent, suggested_id, suggested_name, suggested_description, reasoning, activity_share_pct)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(s.from_agent, s.suggested_id, s.suggested_name, s.suggested_description, s.reasoning, s.activity_share_pct);
+  return Number(r.lastInsertRowid);
+}
+
+export function listActiveAgentSuggestions(): AgentSuggestion[] {
+  return db.prepare(
+    `SELECT * FROM agent_suggestions
+     WHERE dismissed_at IS NULL AND acted_at IS NULL
+     ORDER BY created_at DESC`,
+  ).all() as AgentSuggestion[];
+}
+
+export function dismissAgentSuggestion(id: number): boolean {
+  const r = db.prepare(
+    `UPDATE agent_suggestions SET dismissed_at = strftime('%s','now')
+     WHERE id = ? AND dismissed_at IS NULL AND acted_at IS NULL`,
+  ).run(id);
+  return r.changes > 0;
+}
+
+export function markAgentSuggestionActed(id: number): boolean {
+  const r = db.prepare(
+    `UPDATE agent_suggestions SET acted_at = strftime('%s','now')
+     WHERE id = ? AND acted_at IS NULL`,
+  ).run(id);
+  return r.changes > 0;
+}
+
+/** Used by the analyzer to skip re-suggesting splits the user already
+ *  rejected or acted on. Returns the set of (from_agent, suggested_id)
+ *  pairs that have any historical suggestion (active or not). */
+export function getRecentlySuggestedSplits(daysBack = 30): Array<{ from_agent: string; suggested_id: string }> {
+  return db.prepare(
+    `SELECT from_agent, suggested_id FROM agent_suggestions
+     WHERE created_at > strftime('%s','now') - (? * 86400)`,
+  ).all(daysBack) as Array<{ from_agent: string; suggested_id: string }>;
+}
+
+/** Hard cap on retained versions per (agent, kind) so the table doesn't
+ *  grow unboundedly. Called after each insert. */
+export function pruneAgentFileHistory(
+  agentId: string,
+  fileKind: AgentFileKind,
+  keep = 100,
+): number {
+  const result = db.prepare(
+    `DELETE FROM agent_file_history
+     WHERE id IN (
+       SELECT id FROM agent_file_history
+       WHERE agent_id = ? AND file_kind = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT -1 OFFSET ?
+     )`,
+  ).run(agentId, fileKind, keep);
+  return result.changes;
 }
