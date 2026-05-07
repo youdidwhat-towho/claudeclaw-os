@@ -24,8 +24,6 @@ import {
   SHOW_COST_FOOTER,
   SMART_ROUTING_ENABLED,
   SMART_ROUTING_CHEAP_MODEL,
-  EXFILTRATION_GUARD_ENABLED,
-  PROTECTED_ENV_VARS,
   DAILY_COST_BUDGET,
   HOURLY_TOKEN_BUDGET,
   PROJECT_ROOT,
@@ -35,7 +33,7 @@ import { logger } from './logger.js';
 import { downloadMedia, buildPhotoMessage, buildDocumentMessage, buildVideoMessage } from './media.js';
 import { buildMemoryContext, evaluateMemoryRelevance, saveConversationTurn, shouldNudgeMemory, MEMORY_NUDGE_TEXT } from './memory.js';
 import { classifyMessageComplexity } from './message-classifier.js';
-import { scanForSecrets, redactSecrets } from './exfiltration-guard.js';
+import { applyExfiltrationGuard } from './exfiltration-guard.js';
 import { trackUsage, getRateStatus } from './rate-tracker.js';
 import { buildCostFooter } from './cost-footer.js';
 import { setHighImportanceCallback } from './memory-ingest.js';
@@ -641,19 +639,7 @@ async function handleMessage(ctx: Context, message: string, forceVoiceReply = fa
     let rawResponse = result.text?.trim() || 'Done.';
 
     // Exfiltration guard: scan for leaked secrets before sending to Telegram
-    if (EXFILTRATION_GUARD_ENABLED) {
-      const protectedValues = PROTECTED_ENV_VARS
-        .map((key) => process.env[key])
-        .filter((v): v is string => !!v && v.length > 8);
-      const secretMatches = scanForSecrets(rawResponse, protectedValues);
-      if (secretMatches.length > 0) {
-        rawResponse = redactSecrets(rawResponse, secretMatches);
-        logger.warn(
-          { matchCount: secretMatches.length, types: secretMatches.map((m) => m.type) },
-          'Exfiltration guard: redacted secrets from response',
-        );
-      }
-    }
+    rawResponse = applyExfiltrationGuard(rawResponse, 'telegram');
 
     // Extract file markers before any formatting
     const { text: responseText, files: fileMarkers } = extractFileMarkers(rawResponse);
@@ -1676,7 +1662,9 @@ async function processDashboardMessage(
       setSession(chatIdStr, result.newSessionId, AGENT_ID);
     }
 
-    const rawResponse = result.text?.trim() || 'Done.';
+    // Exfiltration guard: scan dashboard output for leaked secrets before
+    // emitting to SSE clients, saving to memory, or relaying to Telegram.
+    const rawResponse = applyExfiltrationGuard(result.text?.trim() || 'Done.', 'dashboard');
 
     // Save conversation turn
     saveConversationTurn(chatIdStr, text, rawResponse, result.newSessionId ?? sessionId, AGENT_ID);

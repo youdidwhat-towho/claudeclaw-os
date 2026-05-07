@@ -5,6 +5,9 @@
  * API keys, tokens, and other sensitive values before they leave the agent.
  */
 
+import { logger } from './logger.js';
+import { EXFILTRATION_GUARD_ENABLED, PROTECTED_ENV_VARS } from './config.js';
+
 export interface SecretMatch {
   type: string;
   position: number;
@@ -151,4 +154,30 @@ export function redactSecrets(text: string, matches: SecretMatch[]): string {
   }
 
   return result;
+}
+
+/**
+ * End-to-end wrapper applied at every outbound surface (Telegram interactive,
+ * dashboard, scheduled tasks, mission tasks). Collects PROTECTED_ENV_VARS,
+ * scans, redacts, and logs warnings.
+ *
+ * No-op when EXFILTRATION_GUARD_ENABLED is false. Returns input unchanged
+ * when no secrets matched.
+ *
+ * @param text          Outbound text to scan
+ * @param contextLabel  Optional label for log correlation (e.g. 'telegram',
+ *                      'dashboard', 'scheduler-task', 'scheduler-mission')
+ */
+export function applyExfiltrationGuard(text: string, contextLabel?: string): string {
+  if (!EXFILTRATION_GUARD_ENABLED) return text;
+  const protectedValues = PROTECTED_ENV_VARS
+    .map((key) => process.env[key])
+    .filter((v): v is string => !!v && v.length > 8);
+  const matches = scanForSecrets(text, protectedValues);
+  if (matches.length === 0) return text;
+  logger.warn(
+    { matchCount: matches.length, types: matches.map((m) => m.type), context: contextLabel },
+    'Exfiltration guard: redacted secrets from response',
+  );
+  return redactSecrets(text, matches);
 }

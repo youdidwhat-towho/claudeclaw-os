@@ -1,6 +1,7 @@
 import { CronExpressionParser } from 'cron-parser';
 
 import { AGENT_ID, ALLOWED_CHAT_ID, agentMcpAllowlist, agentDefaultModel } from './config.js';
+import { applyExfiltrationGuard } from './exfiltration-guard.js';
 import { ingestConversationTurn } from './memory-ingest.js';
 import {
   getDueTasks,
@@ -103,7 +104,12 @@ async function runDueTasks(): Promise<void> {
           return;
         }
 
-        const text = result.text?.trim() || 'Task completed with no output.';
+        // Exfiltration guard runs BEFORE Telegram send, conversation log, and
+        // memory ingestion so secrets never leak via any downstream surface.
+        const text = applyExfiltrationGuard(
+          result.text?.trim() || 'Task completed with no output.',
+          'scheduler-task',
+        );
         for (const chunk of splitMessage(formatForTelegram(text))) {
           await sender(chunk);
         }
@@ -196,7 +202,12 @@ async function runDueMissionTasks(): Promise<void> {
           }
         }
       } else {
-        const text = result.text?.trim() || 'Task completed with no output.';
+        // Exfiltration guard runs BEFORE persistence, Telegram send, and
+        // memory ingestion so secrets never leak via any downstream surface.
+        const text = applyExfiltrationGuard(
+          result.text?.trim() || 'Task completed with no output.',
+          'scheduler-mission',
+        );
         completeMissionTask(mission.id, text, 'completed');
         logger.info({ missionId: mission.id }, 'Mission task completed');
 
